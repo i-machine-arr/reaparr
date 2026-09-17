@@ -54,15 +54,27 @@ function connConfig(row: { baseUrl: string | null, credential: string | null } |
 // /data as separate entries with no guaranteed order) — /api/v3/diskspace alone can't say which one
 // is the actual media root. Match against the real configured root folder path instead of blindly
 // taking the first entry.
+// Sonarr/Radarr can run natively on Windows too, not just Linux Docker — normalize backslashes to
+// forward slashes and compare case-insensitively so a drive-letter or UNC root folder still matches.
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, '/').toLowerCase()
+}
+
 function isPathUnder(candidatePath: string, mountPath: string): boolean {
-  if (mountPath === '/') return true
-  const normalized = mountPath.endsWith('/') ? mountPath.slice(0, -1) : mountPath
-  return candidatePath === normalized || candidatePath.startsWith(`${normalized}/`)
+  const candidate = normalizePath(candidatePath)
+  const mount = normalizePath(mountPath)
+  if (mount === '/') return true
+  const normalized = mount.endsWith('/') ? mount.slice(0, -1) : mount
+  return candidate === normalized || candidate.startsWith(`${normalized}/`)
 }
 
 function pickMediaDisk(disks: NormalizedDiskSpace[], rootFolderPaths: string[]): NormalizedDiskSpace | null {
-  const rootPath = rootFolderPaths[0] // v1 simplification (docs/adr/0008): single configured root folder
-  if (!rootPath) return null
+  // Multiple configured root folders could sit on physically different disks, and titles aren't
+  // (yet) associated with which root folder they actually live under — guessing which root's disk
+  // to check could delete titles on an unpressured disk while a different, pressured one stays full,
+  // or the reverse. Skip rather than guess; single-root-folder setups (the common case) are exact.
+  if (rootFolderPaths.length !== 1) return null
+  const rootPath = rootFolderPaths[0]!
   let best: NormalizedDiskSpace | null = null
   for (const d of disks) {
     if (!isPathUnder(rootPath, d.path)) continue

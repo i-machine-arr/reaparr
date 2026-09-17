@@ -94,6 +94,13 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
       const files = await sourceFetch<SonarrEpisodeFile[]>(config, AUTH, '/api/v3/episodefile', {
         query: { seriesId }
       })
+      // Reject a malformed/absent response BEFORE unmonitoring — sourceFetch returns undefined for
+      // an empty 200 body, which `files ?? []` would otherwise treat as "no files to delete." That
+      // would still unmonitor the series and report a clean success with deletedBytes: 0, so the
+      // caller marks the title removed and notifies even though its files are still on disk.
+      if (!Array.isArray(files) || files.some(f => typeof f?.id !== 'number')) {
+        throw new Error('Invalid Sonarr episode file response')
+      }
       // Unmonitor BEFORE deleting files, not after — a successful DELETE followed by a failed PUT
       // would leave the series monitored with its files gone, and Sonarr would immediately re-grab
       // what was just deleted. Re-acquisition is expected to happen via the downstream placeholder
@@ -104,7 +111,7 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
         await sourceFetch(config, AUTH, `/api/v3/series/${seriesId}`, { method: 'PUT', body: series })
       }
       let deletedBytes = 0
-      for (const f of files ?? []) {
+      for (const f of files) {
         deletedBytes += f.size ?? 0
         await sourceFetch(config, AUTH, `/api/v3/episodefile/${f.id}`, { method: 'DELETE' })
       }

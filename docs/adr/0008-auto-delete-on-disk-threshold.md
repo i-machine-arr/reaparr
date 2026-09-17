@@ -70,9 +70,21 @@ reuse.
   all three, not just one.
 - v1 matches the configured root folder's path against `/api/v3/diskspace`'s entries (longest-prefix
   match) rather than guessing the first entry — real Sonarr/Radarr can report unrelated mounts
-  (`/`, `/config`) alongside the actual media disk, with no guaranteed order. Multi-root-folder
-  aggregation for an instance spanning multiple *distinct* media disks is still a known simplification
-  (single configured root folder assumed), not silently wrong for the common single-disk case.
+  (`/`, `/config`) alongside the actual media disk, with no guaranteed order. A source with more than
+  one configured root folder is skipped entirely rather than guessed at, since titles aren't (yet)
+  associated with which root folder they actually live under — guessing could check the wrong disk's
+  pressure for a given title. The common single-root-folder case is exact, not an approximation.
+- **Accepted risk, flagged explicitly rather than silently decided**: `/api/reaping/auto-delete-run`
+  (the manual trigger) has no authentication, same as every other endpoint in this app — there is no
+  session/auth model anywhere yet (upstream's own M1 decision, ADR-0006, LAN-trusted by design,
+  deferred to a separate M2 auth plan). What's different here is that a single unauthenticated POST
+  can trigger bulk, potentially irreversible deletion, unlike the existing per-title endpoints which
+  each require the caller to have already identified one specific title. Mitigating factor: the
+  endpoint is gated behind the same `reaping_auto_delete_enabled` setting as the hourly scheduled
+  task, so anyone reaching it while auto-delete is off (the default) triggers a no-op; if it's on,
+  the scheduled task would do the same thing within the hour regardless. Adding auth to only this one
+  endpoint would be inconsistent with the rest of the unauthenticated app and is out of scope for this
+  change — surfaced here for an explicit human call, not decided unilaterally.
 - Plex and Emby users get watch-history/eligibility scoring today (unaffected by this change) but not
   Leaving Soon visibility until Phase 2 lands.
 
