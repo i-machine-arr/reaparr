@@ -34,6 +34,8 @@ export function redactUrl(url: string, credential?: string): string {
 export interface FetchOptions {
   query?: Record<string, string | number | undefined>
   timeoutMs?: number
+  method?: string
+  body?: unknown
 }
 
 export async function sourceFetch<T = unknown>(
@@ -55,11 +57,16 @@ export async function sourceFetch<T = unknown>(
   } else {
     url.searchParams.set(auth.param, config.credential)
   }
+  let body: string | undefined
+  if (opts.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(opts.body)
+  }
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   try {
-    const res = await fetch(url, { headers, signal: controller.signal })
+    const res = await fetch(url, { method: opts.method ?? 'GET', headers, body, signal: controller.signal })
     if (!res.ok) {
       throw new SourceHttpError(`HTTP ${res.status} for ${redactUrl(url.toString(), config.credential)}`, res.status)
     }

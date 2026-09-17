@@ -1,7 +1,13 @@
 import { sourceFetch } from './http'
-import type { AuthInjection, ConnectionConfig, NormalizedSeries, ProbeResult, SonarrClient } from './types'
+import type {
+  AuthInjection, ConnectionConfig, DeleteFileResult, NormalizedRootFolder, NormalizedSeries,
+  ProbeResult, SonarrClient
+} from './types'
 
 const AUTH: AuthInjection = { kind: 'header', name: 'X-Api-Key' }
+
+interface SonarrRootFolder { path: string, freeSpace?: number, totalSpace?: number }
+interface SonarrEpisodeFile { id: number, size?: number }
 
 interface SonarrSeasonStats { sizeOnDisk?: number, episodeFileCount?: number }
 interface SonarrSeason { seasonNumber: number, statistics?: SonarrSeasonStats }
@@ -69,6 +75,32 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
     async getSeries(): Promise<NormalizedSeries[]> {
       const series = await sourceFetch<SonarrSeries[]>(config, AUTH, '/api/v3/series')
       return (series ?? []).map(normalizeSeries)
+    },
+    async getRootFolders(): Promise<NormalizedRootFolder[]> {
+      const folders = await sourceFetch<SonarrRootFolder[]>(config, AUTH, '/api/v3/rootfolder')
+      return (folders ?? []).map(f => ({
+        path: f.path,
+        freeSpace: f.freeSpace ?? 0,
+        totalSpace: f.totalSpace ?? 0
+      }))
+    },
+    async deleteSeriesFiles(seriesId: number): Promise<DeleteFileResult> {
+      const files = await sourceFetch<SonarrEpisodeFile[]>(config, AUTH, '/api/v3/episodefile', {
+        query: { seriesId }
+      })
+      let deletedBytes = 0
+      for (const f of files ?? []) {
+        deletedBytes += f.size ?? 0
+        await sourceFetch(config, AUTH, `/api/v3/episodefile/${f.id}`, { method: 'DELETE' })
+      }
+      // Unmonitor so Sonarr doesn't immediately re-grab what we just deleted — re-acquisition is
+      // expected to happen via the downstream placeholder tool's play-triggered re-request instead.
+      const series = await sourceFetch<Record<string, unknown>>(config, AUTH, `/api/v3/series/${seriesId}`)
+      if (series) {
+        series.monitored = false
+        await sourceFetch(config, AUTH, `/api/v3/series/${seriesId}`, { method: 'PUT', body: series })
+      }
+      return { deletedBytes }
     }
   }
 }

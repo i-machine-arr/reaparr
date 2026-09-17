@@ -1,7 +1,7 @@
 // Source adapter contracts (plan §4). Every adapter returns NORMALIZED typed
 // objects — the rest of the pipeline never sees source-shaped JSON.
 
-export type Source = 'sonarr' | 'radarr' | 'seerr' | 'tautulli'
+export type Source = 'sonarr' | 'radarr' | 'seerr' | 'tautulli' | 'jellyfin'
 
 export type AuthInjection
   = | { kind: 'header', name: string } // sonarr, radarr, seerr → X-Api-Key
@@ -38,6 +38,16 @@ export interface NormalizedSeries {
   seriesType: string | null // 'standard'|'anime'
   rating: number | null // consolidated 0–10 community score
   seasons: NormalizedSeason[]
+}
+
+export interface NormalizedRootFolder {
+  path: string
+  freeSpace: number
+  totalSpace: number
+}
+
+export interface DeleteFileResult {
+  deletedBytes: number
 }
 
 export interface NormalizedMovie {
@@ -99,16 +109,34 @@ export interface SourceClient {
 
 export interface SonarrClient extends SourceClient {
   getSeries(): Promise<NormalizedSeries[]>
+  getRootFolders(): Promise<NormalizedRootFolder[]>
+  deleteSeriesFiles(seriesId: number): Promise<DeleteFileResult>
 }
 export interface RadarrClient extends SourceClient {
   getMovies(): Promise<NormalizedMovie[]>
+  getRootFolders(): Promise<NormalizedRootFolder[]>
+  deleteMovieFile(movieId: number): Promise<DeleteFileResult>
 }
 export interface SeerrClient extends SourceClient {
   getRequests(): Promise<NormalizedRequest[]>
   getUsers(): Promise<NormalizedSourceUser[]>
 }
-export interface TautulliClient extends SourceClient {
+// A media server's watch-history + Leaving Soon capability. Tautulli (Plex) and Jellyfin both
+// implement this; the shape is deliberately generic (keyed on tmdb/tvdb ids, never a server-native
+// rating key) so it isn't Plex-shaped underneath. See docs/adr/0008.
+export interface LeavingSoonTarget {
+  tmdbId: number | null
+  tvdbId: number | null
+  mediaType: 'movie' | 'series'
+}
+
+export interface MediaServerClient extends SourceClient {
   getHistory(after?: string): Promise<NormalizedHistoryRow[]>
   getUsers(): Promise<NormalizedSourceUser[]>
   getMetadata(ratingKey: string): Promise<NormalizedMetadata | null>
+  // Idempotent full desired-state replace: the Leaving Soon collection ends up containing exactly
+  // these items, nothing more.
+  syncLeavingSoonCollection(items: LeavingSoonTarget[]): Promise<void>
 }
+
+export type TautulliClient = MediaServerClient

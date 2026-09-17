@@ -1,7 +1,12 @@
 import { sourceFetch } from './http'
-import type { AuthInjection, ConnectionConfig, NormalizedMovie, ProbeResult, RadarrClient } from './types'
+import type {
+  AuthInjection, ConnectionConfig, DeleteFileResult, NormalizedMovie, NormalizedRootFolder,
+  ProbeResult, RadarrClient
+} from './types'
 
 const AUTH: AuthInjection = { kind: 'header', name: 'X-Api-Key' }
+
+interface RadarrRootFolder { path: string, freeSpace?: number, totalSpace?: number }
 
 // Each rating child is { votes, value, type }. imdb/tmdb are 0–10; rottenTomatoes
 // is the critic score as a percentage (0–100).
@@ -50,6 +55,28 @@ export function createRadarrClient(config: ConnectionConfig): RadarrClient {
     async getMovies(): Promise<NormalizedMovie[]> {
       const movies = await sourceFetch<RadarrMovie[]>(config, AUTH, '/api/v3/movie')
       return (movies ?? []).map(normalizeMovie)
+    },
+    async getRootFolders(): Promise<NormalizedRootFolder[]> {
+      const folders = await sourceFetch<RadarrRootFolder[]>(config, AUTH, '/api/v3/rootfolder')
+      return (folders ?? []).map(f => ({
+        path: f.path,
+        freeSpace: f.freeSpace ?? 0,
+        totalSpace: f.totalSpace ?? 0
+      }))
+    },
+    async deleteMovieFile(movieId: number): Promise<DeleteFileResult> {
+      const movie = await sourceFetch<Record<string, unknown> & { movieFile?: { id: number, size?: number } }>(
+        config, AUTH, `/api/v3/movie/${movieId}`
+      )
+      if (!movie?.movieFile) return { deletedBytes: 0 }
+      const deletedBytes = movie.movieFile.size ?? 0
+      await sourceFetch(config, AUTH, `/api/v3/moviefile/${movie.movieFile.id}`, { method: 'DELETE' })
+      // Unmonitor so Radarr doesn't immediately re-grab what we just deleted — same reasoning as
+      // Sonarr's deleteSeriesFiles.
+      movie.monitored = false
+      delete movie.movieFile
+      await sourceFetch(config, AUTH, `/api/v3/movie/${movieId}`, { method: 'PUT', body: movie })
+      return { deletedBytes }
     }
   }
 }
