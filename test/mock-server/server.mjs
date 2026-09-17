@@ -40,7 +40,9 @@ const movieMonitored = new Map(seedBundle.movies.map(m => [m.sourceId, true]))
 const JELLYFIN_USER_ID = 'mock-admin'
 let leavingSoonCollectionId = null
 const leavingSoonMembers = new Set()
-function jellyfinItemId(kind, sourceId) { return `${kind}-${sourceId}` }
+function jellyfinItemId(kind, sourceId) {
+  return `${kind}-${sourceId}`
+}
 function jellyfinLibraryItems() {
   return [
     ...seedBundle.series.map(s => ({
