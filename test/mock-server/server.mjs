@@ -17,6 +17,52 @@ const VERSION = '1.0.0-mock'
 const NOW = process.env.MOCK_NOW ? Number(process.env.MOCK_NOW) : null
 const isoToEpoch = iso => (iso ? Math.floor(Date.parse(iso) / 1000) : 0)
 
+// --- Mutable fake-filesystem state (auto-delete + Leaving Soon path testing) ------------------
+// Built once at startup from the same demo bundle /api/v3/series and /api/v3/movie report, so a
+// delete call here is consistent with what a real adapter fetched. One shared root folder — same
+// simplification runAutoDeletePass itself makes (a single pool, matching a real deployment where
+// Sonarr and Radarr point at the same physical disk).
+const GB = 1024 ** 3
+const seedBundle = buildDemoBundle(NOW ?? Date.now())
+let rootFree = Number(process.env.MOCK_ROOT_FREE_BYTES ?? 20 * GB)
+const rootTotal = Number(process.env.MOCK_ROOT_TOTAL_BYTES ?? 100 * GB)
+
+const episodeFilesBySeries = new Map(seedBundle.series.map((s) => {
+  const perEp = Math.floor(s.sizeOnDisk / Math.max(1, s.downloadedEpisodes))
+  const files = Array.from({ length: s.downloadedEpisodes }, (_, i) => ({ id: s.sourceId * 1000 + i, size: perEp }))
+  return [s.sourceId, files]
+}))
+const seriesMonitored = new Map(seedBundle.series.map(s => [s.sourceId, true]))
+const movieFileByMovie = new Map(seedBundle.movies.filter(m => m.hasFile).map(m => [m.sourceId, { id: m.sourceId + 9000, size: m.sizeOnDisk }]))
+const movieMonitored = new Map(seedBundle.movies.map(m => [m.sourceId, true]))
+
+// --- Mutable fake Jellyfin state (Leaving Soon path testing) ----------------------------------
+const JELLYFIN_USER_ID = 'mock-admin'
+let leavingSoonCollectionId = null
+const leavingSoonMembers = new Set()
+function jellyfinItemId(kind, sourceId) {
+  return `${kind}-${sourceId}`
+}
+function jellyfinLibraryItems() {
+  return [
+    ...seedBundle.series.map(s => ({
+      Id: jellyfinItemId('series', s.sourceId), Type: 'Series',
+      ProviderIds: { Tvdb: String(s.tvdbId), Tmdb: String(s.tmdbId) },
+      UserData: { Played: false }
+    })),
+    ...seedBundle.movies.map(m => ({
+      Id: jellyfinItemId('movie', m.sourceId), Type: 'Movie',
+      ProviderIds: { Tmdb: String(m.tmdbId) },
+      UserData: { Played: false }
+    }))
+  ]
+}
+async function readJsonBody(req) {
+  let raw = ''
+  for await (const chunk of req) raw += chunk
+  return raw ? JSON.parse(raw) : {}
+}
+
 function reshapeSeries(s) {
   return {
     id: s.sourceId, title: s.title, year: s.year, tvdbId: s.tvdbId, tmdbId: s.tmdbId, imdbId: s.imdbId,
@@ -75,6 +121,123 @@ async function handle(req, res) {
   }
   if (path === '/api/v3/movie') {
     return send(res, 200, bundle.movies.map(reshapeMovie))
+  }
+  // Real Sonarr/Radarr's /api/v3/rootfolder does NOT report totalSpace (freeSpace only, confirmed
+  // against a real instance) — /api/v3/diskspace is the endpoint that reports both.
+  if (path === '/api/v3/diskspace') {
+    return send(res, 200, [{ path: '/data', freeSpace: rootFree, totalSpace: rootTotal }])
+  }
+  if (path === '/api/v3/rootfolder') {
+    return send(res, 200, [{ path: '/data' }])
+  }
+  if (path === '/api/v3/episodefile') {
+    const seriesId = Number(q.get('seriesId'))
+    return send(res, 200, episodeFilesBySeries.get(seriesId) ?? [])
+  }
+  {
+    const m = /^\/api\/v3\/episodefile\/(\d+)$/.exec(path)
+    if (m && req.method === 'DELETE') {
+      const id = Number(m[1])
+      for (const files of episodeFilesBySeries.values()) {
+        const idx = files.findIndex(f => f.id === id)
+        if (idx >= 0) {
+          rootFree += files[idx].size
+          files.splice(idx, 1)
+          break
+        }
+      }
+      return send(res, 200, {})
+    }
+  }
+  {
+    const m = /^\/api\/v3\/series\/(\d+)$/.exec(path)
+    if (m) {
+      const seriesId = Number(m[1])
+      const s = seedBundle.series.find(x => x.sourceId === seriesId)
+      if (!s) return send(res, 404, { error: 'not found' })
+      if (req.method === 'PUT') {
+        const body = await readJsonBody(req)
+        seriesMonitored.set(seriesId, body.monitored !== false)
+        return send(res, 200, body)
+      }
+      return send(res, 200, { ...reshapeSeries(s), monitored: seriesMonitored.get(seriesId) ?? true })
+    }
+  }
+  {
+    const m = /^\/api\/v3\/movie\/(\d+)$/.exec(path)
+    if (m) {
+      const movieId = Number(m[1])
+      const mv = seedBundle.movies.find(x => x.sourceId === movieId)
+      if (!mv) return send(res, 404, { error: 'not found' })
+      if (req.method === 'PUT') {
+        const body = await readJsonBody(req)
+        movieMonitored.set(movieId, body.monitored !== false)
+        return send(res, 200, body)
+      }
+      const file = movieFileByMovie.get(movieId)
+      return send(res, 200, { ...reshapeMovie(mv), monitored: movieMonitored.get(movieId) ?? true, movieFile: file ?? undefined })
+    }
+  }
+  {
+    const m = /^\/api\/v3\/moviefile\/(\d+)$/.exec(path)
+    if (m && req.method === 'DELETE') {
+      const id = Number(m[1])
+      for (const [movieId, file] of movieFileByMovie) {
+        if (file.id === id) {
+          rootFree += file.size
+          movieFileByMovie.delete(movieId)
+          break
+        }
+      }
+      return send(res, 200, {})
+    }
+  }
+
+  // --- Jellyfin ---------------------------------------------------------------
+  if (path === '/System/Info') {
+    return send(res, 200, { Version: VERSION })
+  }
+  if (path === '/Users' && !path.includes('/Items')) {
+    return send(res, 200, [{ Id: JELLYFIN_USER_ID, Name: 'admin', Policy: { IsAdministrator: true, EnableAllFolders: true } }])
+  }
+  {
+    const m = /^\/Users\/[^/]+\/Items$/.exec(path)
+    if (m) {
+      return send(res, 200, { Items: jellyfinLibraryItems() })
+    }
+  }
+  {
+    const m = /^\/Items\/([^/]+)$/.exec(path)
+    if (m && path !== '/Items') {
+      const item = jellyfinLibraryItems().find(i => i.Id === m[1])
+      if (!item) return send(res, 404, { error: 'not found' })
+      return send(res, 200, item)
+    }
+  }
+  if (path === '/Items') {
+    if (q.get('IncludeItemTypes') === 'BoxSet') {
+      const items = leavingSoonCollectionId ? [{ Id: leavingSoonCollectionId, Name: 'Leaving Soon' }] : []
+      return send(res, 200, { Items: items })
+    }
+    const parentId = q.get('ParentId')
+    if (parentId && parentId === leavingSoonCollectionId) {
+      return send(res, 200, { Items: [...leavingSoonMembers].map(id => ({ Id: id })) })
+    }
+    return send(res, 200, { Items: [] })
+  }
+  if (path === '/Collections' && req.method === 'POST') {
+    leavingSoonCollectionId = 'leaving-soon-collection'
+    for (const id of (q.get('Ids') ?? '').split(',').filter(Boolean)) leavingSoonMembers.add(id)
+    return send(res, 200, { Id: leavingSoonCollectionId })
+  }
+  {
+    const m = /^\/Collections\/([^/]+)\/Items$/.exec(path)
+    if (m) {
+      const ids = (q.get('Ids') ?? '').split(',').filter(Boolean)
+      if (req.method === 'POST') ids.forEach(id => leavingSoonMembers.add(id))
+      if (req.method === 'DELETE') ids.forEach(id => leavingSoonMembers.delete(id))
+      return send(res, 200, {})
+    }
   }
 
   // --- Seerr ----------------------------------------------------------------

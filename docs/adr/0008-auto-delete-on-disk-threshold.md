@@ -1,0 +1,125 @@
+# ADR-0008 — Auto-delete on disk threshold, and Leaving Soon via native collections
+
+**Status:** Accepted (2026-09-16)
+
+## Context
+
+The reaping workflow (ADR-0001) already tracks titles through `eligible -> scheduled -> appealed ->
+due -> removed`, but `due -> removed` (`markRemoved`) only ever flipped a database row and sent an
+email — it never called Sonarr/Radarr, never deleted a file. The state machine assumed a human would
+notice a title in "The Appointed Hour," delete it manually in the *arr, then click a button. That's a
+deliberate MVP scope cut (this app is explicitly "read-only" per the README), but it means the actual
+disk-management payoff — the reason to run this at all — never happened automatically.
+
+Separately, the grace window (`scheduled`/`appealed`, `reaping_grace_days`) was internal-only: members
+learn about it by email, but there's no equivalent of the "Leaving Soon" shelf a media server's own
+front page can show.
+
+## Decision
+
+**Auto-delete.** A new hourly task checks, per *arr source with `due` titles, whether that source's
+root folder is over a configurable threshold (`reaping_disk_threshold_percent`, default 75%, ships
+**disabled** by default). If so, it deletes files for due titles — oldest-due first, up to a
+configurable per-run cap (`reaping_max_deletes_per_run`) — via the *arr's own file-delete endpoint
+(episode files / movie file), then sets `monitored: false`. It never deletes the catalog entry itself.
+
+This deliberately mirrors an existing, working deployment pattern (a Janitorr + janitorr-stats +
+Placeholdarr compose stack) rather than inventing a new one:
+- **File-only delete, catalog survives unmonitored** — same as that stack's `only-delete-files: true`.
+  This is what lets a tombstoned title in reaparr's own model resurrect cleanly (ADR-0002), and lets a
+  downstream placeholder tool's normal *arr-webhook listener drop in a redownload-on-demand placeholder
+  with zero new wiring on either side.
+- **`monitored: false` is intentional**, not cleanup: it's what makes "play the placeholder ->
+  re-request -> re-monitor + search" the correct re-acquisition path instead of the *arr silently
+  re-grabbing what was just freed.
+- **Space is read via each *arr's own `/diskspace` endpoint**, never the filesystem — reaparr's
+  container needs no media volume mount at all, unlike a symlink-based approach. (`/rootfolder` looks
+  like the obvious candidate and was the first thing tried, but real Sonarr/Radarr only report
+  `freeSpace` there, not `totalSpace` — caught by testing against real instances, not just the mock.)
+- **A hard per-run cap** is a genuine addition, not a copy: neither Janitorr nor Maintainerr support one
+  (verified against both projects' source during that same prior deployment).
+- **Runs hourly**, separate from the existing daily 03:00 full sync — that cadence is fine for
+  score/eligibility freshness, far too slow for real disk-pressure response.
+
+**Leaving Soon.** Titles in `scheduled`/`appealed` (the grace window) are synced into a "Leaving Soon"
+collection on the media server itself, via each server's **native Collections API** — not a symlinked
+library folder — so the API-only adapter architecture holds. Membership is *derived*: every run
+recomputes the full desired set from current title state and diffs it against the collection's actual
+contents (add missing, remove stale), rather than patching membership on each individual transition.
+Simpler to reason about, and self-healing if a previous run's call failed partway.
+
+This is where "it should work for anybody" (Plex, Jellyfin, Emby) meets reality: Tautulli — reaparr's
+existing watch-history source — is read-only Plex monitoring with no collection-write capability at
+all, and Jellyfin/Emby have no Tautulli equivalent (they report watch state and manage collections
+natively). `TautulliClient` is generalized into a shared `MediaServerClient` interface
+(`getHistory`/`getUsers`/`getMetadata`/`syncLeavingSoonCollection`), keyed on tmdb/tvdb ids rather than
+any server-native rating key, so the abstraction doesn't leak Plex's shape into Jellyfin/Emby code.
+**Phase 1** (this change) ships a fully working Jellyfin adapter against that interface — the
+currently-real, currently-deployed target. Tautulli's own `syncLeavingSoonCollection` throws rather
+than silently no-op-ing, since Plex collection writes need a *second*, direct Plex API adapter.
+**Phase 2** (follow-up PRs, same interface): a direct Plex adapter and an Emby adapter — Emby's
+protocol closely mirrors Jellyfin's (Jellyfin was originally forked from Emby), so expect substantial
+reuse.
+
+## Consequences
+
+- No new architecture: auto-delete and Leaving Soon both reuse the existing state machine, adapter
+  pattern, and `app_setting`/settings-page conventions rather than introducing new ones.
+- The disk-threshold gate is a second, independent safety rail on top of the existing age+watched
+  eligibility scoring and the grace/appeal workflow — a title only gets deleted once it has cleared
+  all three, not just one.
+- v1 matches the configured root folder's path against `/api/v3/diskspace`'s entries (longest-prefix
+  match) rather than guessing the first entry — real Sonarr/Radarr can report unrelated mounts
+  (`/`, `/config`) alongside the actual media disk, with no guaranteed order. A source with more than
+  one configured root folder is skipped entirely rather than guessed at, since titles aren't (yet)
+  associated with which root folder they actually live under — guessing could check the wrong disk's
+  pressure for a given title. The common single-root-folder case is exact, not an approximation.
+- **Accepted risk, flagged explicitly rather than silently decided**: `/api/reaping/auto-delete-run`
+  (the manual trigger) has no authentication, same as every other endpoint in this app — there is no
+  session/auth model anywhere yet (upstream's own M1 decision, ADR-0006, LAN-trusted by design,
+  deferred to a separate M2 auth plan). What's different here is that a single unauthenticated POST
+  can trigger bulk, potentially irreversible deletion, unlike the existing per-title endpoints which
+  each require the caller to have already identified one specific title. Mitigating factor: the
+  endpoint is gated behind the same `reaping_auto_delete_enabled` setting as the hourly scheduled
+  task, so anyone reaching it while auto-delete is off (the default) triggers a no-op; if it's on,
+  the scheduled task would do the same thing within the hour regardless. Adding auth to only this one
+  endpoint would be inconsistent with the rest of the unauthenticated app and is out of scope for this
+  change — surfaced here for an explicit human call, not decided unilaterally.
+- Plex and Emby users get watch-history/eligibility scoring today (unaffected by this change) but not
+  Leaving Soon visibility until Phase 2 lands.
+
+## Post-review hardening
+
+A CodeRabbit pass on the initial PR caught several real correctness/safety gaps, fixed before merge:
+
+- **Cross-workflow exclusion** (`server/sync/exclusion.ts`): Nitro runs same-cron-minute scheduled
+  tasks in parallel with no ordering guarantee between separate schedule entries. `runSync` and
+  `runAutoDeletePass` now both go through a shared FIFO queue so a sync's reaping tick (which can
+  auto-reprieve or resurrect a title) can never run concurrently with auto-delete acting on a stale
+  snapshot of that same title.
+- **Unmonitor before delete, not after** (`sonarr.ts`/`radarr.ts`): a successful file DELETE followed
+  by a failed unmonitor PUT would leave the item monitored with its file gone — the *arr would
+  immediately re-grab what was just deleted. Reordered so the PUT happens first.
+- **Settings validation order** (`auto-delete.put.ts`): validating the raw input before rounding let
+  e.g. `0.4` pass a `>0` check and then round down to `0`, which means "unlimited" for the per-run cap
+  and "delete at any usage" for the threshold — silently defeating both safety limits. Now rounds
+  first, validates the normalized integer.
+- **Notification ordering** (`autoDelete.ts`): a rejected `departed` notification used to prevent the
+  deletion counters from incrementing, which let `maxDeletesPerRun` be silently bypassed. Counters now
+  update immediately after the deletion is recorded; the notification runs in its own try/catch.
+- **Jellyfin history granularity**: querying `Movie,Series` for watch history collapsed an entire
+  watched series into one history row instead of one per episode, undercounting completion. History
+  now queries `Movie,Episode` separately; `Movie,Series` is kept for collection matching only.
+- **Jellyfin library user selection**: `syncLeavingSoonCollection` used to enumerate the library
+  through whichever user happened to be first, which could be a restricted account missing real
+  items from `desiredIds` and incorrectly dropping them from the collection. Now prefers a verified
+  administrator with full folder access.
+- **Jellyfin provider-ID matching**: tmdb/tvdb lookup maps are now keyed by media type as well as id,
+  preventing a cross-type id collision (a movie and series coincidentally sharing a raw provider id)
+  from matching the wrong item.
+- **Jellyfin response validation**: a malformed (non-array) `Items` response used to be silently
+  treated the same as a genuinely empty library, which could wipe the whole Leaving Soon collection.
+  Malformed responses now throw instead of returning `[]`.
+- **Jellyfin sync error surfacing** (`run.ts`): a Leaving Soon failure was only recorded under
+  `errors.leavingSoon`, but the per-source status loop reads `errors[c.source]` — the Jellyfin
+  connection incorrectly showed "ok" in Settings even after a real failure. Now recorded under both.

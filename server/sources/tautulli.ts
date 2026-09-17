@@ -126,6 +126,13 @@ export function createTautulliClient(config: ConnectionConfig): TautulliClient {
         mediaType: data.media_type ?? null,
         ...ids
       }
+    },
+    async syncLeavingSoonCollection(): Promise<void> {
+      // Tautulli is read-only monitoring — it has no Plex collection-write endpoints. Plex Leaving
+      // Soon support needs a separate direct-Plex-API adapter (docs/adr/0008, Phase 2); until then
+      // reaping/leavingSoon.ts only calls this for sources it knows support it, so this is never
+      // reached in practice, but throws rather than silently no-op-ing if it ever is.
+      throw new Error('Tautulli cannot manage Plex collections — Leaving Soon needs a direct Plex adapter (not yet implemented)')
     }
   }
 }

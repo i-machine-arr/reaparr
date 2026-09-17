@@ -62,6 +62,14 @@ function reset() {
         >
           Notifications
         </UButton>
+        <UButton
+          to="/settings/auto-delete"
+          color="neutral"
+          variant="ghost"
+          icon="i-lucide-trash-2"
+        >
+          Auto-delete
+        </UButton>
       </div>
     </div>
 
