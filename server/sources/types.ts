@@ -40,7 +40,7 @@ export interface NormalizedSeries {
   seasons: NormalizedSeason[]
 }
 
-export interface NormalizedRootFolder {
+export interface NormalizedDiskSpace {
   path: string
   freeSpace: number
   totalSpace: number
@@ -109,12 +109,12 @@ export interface SourceClient {
 
 export interface SonarrClient extends SourceClient {
   getSeries(): Promise<NormalizedSeries[]>
-  getRootFolders(): Promise<NormalizedRootFolder[]>
+  getDiskSpace(): Promise<NormalizedDiskSpace[]>
   deleteSeriesFiles(seriesId: number): Promise<DeleteFileResult>
 }
 export interface RadarrClient extends SourceClient {
   getMovies(): Promise<NormalizedMovie[]>
-  getRootFolders(): Promise<NormalizedRootFolder[]>
+  getDiskSpace(): Promise<NormalizedDiskSpace[]>
   deleteMovieFile(movieId: number): Promise<DeleteFileResult>
 }
 export interface SeerrClient extends SourceClient {

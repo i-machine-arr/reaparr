@@ -82,7 +82,7 @@ export async function runAutoDeletePass(
     const client = source === 'sonarr' ? createSonarrClient(cfg) : createRadarrClient(cfg)
     let folders
     try {
-      folders = await client.getRootFolders()
+      folders = await client.getDiskSpace()
     } catch {
       continue // can't read space for this source right now — try again next run
     }

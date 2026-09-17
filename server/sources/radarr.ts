@@ -1,12 +1,14 @@
 import { sourceFetch } from './http'
 import type {
-  AuthInjection, ConnectionConfig, DeleteFileResult, NormalizedMovie, NormalizedRootFolder,
+  AuthInjection, ConnectionConfig, DeleteFileResult, NormalizedMovie, NormalizedDiskSpace,
   ProbeResult, RadarrClient
 } from './types'
 
 const AUTH: AuthInjection = { kind: 'header', name: 'X-Api-Key' }
 
-interface RadarrRootFolder { path: string, freeSpace?: number, totalSpace?: number }
+// NOTE: /api/v3/rootfolder does NOT report totalSpace on real Radarr (freeSpace only) — confirmed
+// against a real instance, not just assumed. /api/v3/diskspace is the endpoint that reports both.
+interface RadarrDiskSpace { path: string, freeSpace?: number, totalSpace?: number }
 
 // Each rating child is { votes, value, type }. imdb/tmdb are 0–10; rottenTomatoes
 // is the critic score as a percentage (0–100).
@@ -56,12 +58,12 @@ export function createRadarrClient(config: ConnectionConfig): RadarrClient {
       const movies = await sourceFetch<RadarrMovie[]>(config, AUTH, '/api/v3/movie')
       return (movies ?? []).map(normalizeMovie)
     },
-    async getRootFolders(): Promise<NormalizedRootFolder[]> {
-      const folders = await sourceFetch<RadarrRootFolder[]>(config, AUTH, '/api/v3/rootfolder')
-      return (folders ?? []).map(f => ({
-        path: f.path,
-        freeSpace: f.freeSpace ?? 0,
-        totalSpace: f.totalSpace ?? 0
+    async getDiskSpace(): Promise<NormalizedDiskSpace[]> {
+      const disks = await sourceFetch<RadarrDiskSpace[]>(config, AUTH, '/api/v3/diskspace')
+      return (disks ?? []).map(d => ({
+        path: d.path,
+        freeSpace: d.freeSpace ?? 0,
+        totalSpace: d.totalSpace ?? 0
       }))
     },
     async deleteMovieFile(movieId: number): Promise<DeleteFileResult> {

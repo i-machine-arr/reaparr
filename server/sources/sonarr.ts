@@ -1,12 +1,14 @@
 import { sourceFetch } from './http'
 import type {
-  AuthInjection, ConnectionConfig, DeleteFileResult, NormalizedRootFolder, NormalizedSeries,
+  AuthInjection, ConnectionConfig, DeleteFileResult, NormalizedDiskSpace, NormalizedSeries,
   ProbeResult, SonarrClient
 } from './types'
 
 const AUTH: AuthInjection = { kind: 'header', name: 'X-Api-Key' }
 
-interface SonarrRootFolder { path: string, freeSpace?: number, totalSpace?: number }
+// NOTE: /api/v3/rootfolder does NOT report totalSpace on real Sonarr (freeSpace only) — confirmed
+// against a real instance, not just assumed. /api/v3/diskspace is the endpoint that reports both.
+interface SonarrDiskSpace { path: string, freeSpace?: number, totalSpace?: number }
 interface SonarrEpisodeFile { id: number, size?: number }
 
 interface SonarrSeasonStats { sizeOnDisk?: number, episodeFileCount?: number }
@@ -76,12 +78,12 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
       const series = await sourceFetch<SonarrSeries[]>(config, AUTH, '/api/v3/series')
       return (series ?? []).map(normalizeSeries)
     },
-    async getRootFolders(): Promise<NormalizedRootFolder[]> {
-      const folders = await sourceFetch<SonarrRootFolder[]>(config, AUTH, '/api/v3/rootfolder')
-      return (folders ?? []).map(f => ({
-        path: f.path,
-        freeSpace: f.freeSpace ?? 0,
-        totalSpace: f.totalSpace ?? 0
+    async getDiskSpace(): Promise<NormalizedDiskSpace[]> {
+      const disks = await sourceFetch<SonarrDiskSpace[]>(config, AUTH, '/api/v3/diskspace')
+      return (disks ?? []).map(d => ({
+        path: d.path,
+        freeSpace: d.freeSpace ?? 0,
+        totalSpace: d.totalSpace ?? 0
       }))
     },
     async deleteSeriesFiles(seriesId: number): Promise<DeleteFileResult> {

@@ -32,8 +32,10 @@ Placeholdarr compose stack) rather than inventing a new one:
 - **`monitored: false` is intentional**, not cleanup: it's what makes "play the placeholder ->
   re-request -> re-monitor + search" the correct re-acquisition path instead of the *arr silently
   re-grabbing what was just freed.
-- **Space is read via each *arr's own `/rootfolder` endpoint**, never the filesystem — reaparr's
-  container needs no media volume mount at all, unlike a symlink-based approach.
+- **Space is read via each *arr's own `/diskspace` endpoint**, never the filesystem — reaparr's
+  container needs no media volume mount at all, unlike a symlink-based approach. (`/rootfolder` looks
+  like the obvious candidate and was the first thing tried, but real Sonarr/Radarr only report
+  `freeSpace` there, not `totalSpace` — caught by testing against real instances, not just the mock.)
 - **A hard per-run cap** is a genuine addition, not a copy: neither Janitorr nor Maintainerr support one
   (verified against both projects' source during that same prior deployment).
 - **Runs hourly**, separate from the existing daily 03:00 full sync — that cadence is fine for

@@ -122,7 +122,9 @@ async function handle(req, res) {
   if (path === '/api/v3/movie') {
     return send(res, 200, bundle.movies.map(reshapeMovie))
   }
-  if (path === '/api/v3/rootfolder') {
+  // Real Sonarr/Radarr's /api/v3/rootfolder does NOT report totalSpace (freeSpace only, confirmed
+  // against a real instance) — /api/v3/diskspace is the endpoint that reports both.
+  if (path === '/api/v3/diskspace') {
     return send(res, 200, [{ path: '/data', freeSpace: rootFree, totalSpace: rootTotal }])
   }
   if (path === '/api/v3/episodefile') {
