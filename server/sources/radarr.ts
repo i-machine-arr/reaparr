@@ -60,11 +60,13 @@ export function createRadarrClient(config: ConnectionConfig): RadarrClient {
     },
     async getDiskSpace(): Promise<NormalizedDiskSpace[]> {
       const disks = await sourceFetch<RadarrDiskSpace[]>(config, AUTH, '/api/v3/diskspace')
-      return (disks ?? []).map(d => ({
-        path: d.path,
-        freeSpace: d.freeSpace ?? 0,
-        totalSpace: d.totalSpace ?? 0
-      }))
+      // Skip entries with a missing/non-finite freeSpace or totalSpace rather than defaulting to 0
+      // — a defaulted freeSpace: 0 against a real, positive totalSpace looks like 100% used and can
+      // wrongly authorize deletion off incomplete data instead of a genuine full disk.
+      return (disks ?? [])
+        .filter((d): d is Required<RadarrDiskSpace> =>
+          typeof d.path === 'string' && Number.isFinite(d.freeSpace) && Number.isFinite(d.totalSpace))
+        .map(d => ({ path: d.path, freeSpace: d.freeSpace, totalSpace: d.totalSpace }))
     },
     async getRootFolderPaths(): Promise<string[]> {
       const folders = await sourceFetch<{ path: string }[]>(config, AUTH, '/api/v3/rootfolder')
@@ -74,8 +76,15 @@ export function createRadarrClient(config: ConnectionConfig): RadarrClient {
       const movie = await sourceFetch<Record<string, unknown> & { movieFile?: { id: number, size?: number } }>(
         config, AUTH, `/api/v3/movie/${movieId}`
       )
-      if (!movie?.movieFile) return { deletedBytes: 0 }
-      const deletedBytes = movie.movieFile.size ?? 0
+      if (!movie?.movieFile) return { deletedBytes: 0, unknownSize: false }
+      // Reject a malformed movieFile (missing numeric id) BEFORE unmonitoring — otherwise the PUT
+      // still goes through, then the DELETE fails against an undefined id, leaving the movie
+      // unmonitored with its file still present.
+      if (!Number.isInteger(movie.movieFile.id)) {
+        throw new Error('Invalid Radarr movie file response')
+      }
+      const unknownSize = !Number.isFinite(movie.movieFile.size)
+      const deletedBytes = unknownSize ? 0 : movie.movieFile.size!
       const movieFileId = movie.movieFile.id
       // Unmonitor BEFORE deleting the file, not after — same reasoning as Sonarr's
       // deleteSeriesFiles: a successful DELETE followed by a failed PUT would leave the movie
@@ -83,7 +92,7 @@ export function createRadarrClient(config: ConnectionConfig): RadarrClient {
       movie.monitored = false
       await sourceFetch(config, AUTH, `/api/v3/movie/${movieId}`, { method: 'PUT', body: movie })
       await sourceFetch(config, AUTH, `/api/v3/moviefile/${movieFileId}`, { method: 'DELETE' })
-      return { deletedBytes }
+      return { deletedBytes, unknownSize }
     }
   }
 }

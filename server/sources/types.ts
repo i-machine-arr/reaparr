@@ -48,6 +48,11 @@ export interface NormalizedDiskSpace {
 
 export interface DeleteFileResult {
   deletedBytes: number
+  // True if any deleted file's size was missing/non-finite in the *arr's response, so deletedBytes
+  // undercounts the real amount freed. A caller tracking cumulative free space from this must not
+  // keep estimating off it — the safe response is to stop further deletions for this source until
+  // the next run re-reads real disk space.
+  unknownSize: boolean
 }
 
 export interface NormalizedMovie {

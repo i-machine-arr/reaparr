@@ -80,11 +80,13 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
     },
     async getDiskSpace(): Promise<NormalizedDiskSpace[]> {
       const disks = await sourceFetch<SonarrDiskSpace[]>(config, AUTH, '/api/v3/diskspace')
-      return (disks ?? []).map(d => ({
-        path: d.path,
-        freeSpace: d.freeSpace ?? 0,
-        totalSpace: d.totalSpace ?? 0
-      }))
+      // Skip entries with a missing/non-finite freeSpace or totalSpace rather than defaulting to 0
+      // — a defaulted freeSpace: 0 against a real, positive totalSpace looks like 100% used and can
+      // wrongly authorize deletion off incomplete data instead of a genuine full disk.
+      return (disks ?? [])
+        .filter((d): d is Required<SonarrDiskSpace> =>
+          typeof d.path === 'string' && Number.isFinite(d.freeSpace) && Number.isFinite(d.totalSpace))
+        .map(d => ({ path: d.path, freeSpace: d.freeSpace, totalSpace: d.totalSpace }))
     },
     async getRootFolderPaths(): Promise<string[]> {
       const folders = await sourceFetch<{ path: string }[]>(config, AUTH, '/api/v3/rootfolder')
@@ -111,11 +113,17 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
         await sourceFetch(config, AUTH, `/api/v3/series/${seriesId}`, { method: 'PUT', body: series })
       }
       let deletedBytes = 0
+      let unknownSize = false
       for (const f of files) {
-        deletedBytes += f.size ?? 0
+        if (Number.isFinite(f.size)) {
+          deletedBytes += f.size!
+        } else {
+          unknownSize = true // don't silently count an unknown size as 0 — the caller must not
+          // keep estimating free space off a number now known to be wrong.
+        }
         await sourceFetch(config, AUTH, `/api/v3/episodefile/${f.id}`, { method: 'DELETE' })
       }
-      return { deletedBytes }
+      return { deletedBytes, unknownSize }
     }
   }
 }

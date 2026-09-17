@@ -13,22 +13,42 @@ function upsert(db: ReturnType<typeof getDb>, key: string, value: string) {
 
 export default defineEventHandler(async (event) => {
   const body = await readBody<AutoDeleteBody>(event)
-  const db = getDb()
 
+  // Validate the whole request before writing anything — silently ignoring one bad field while
+  // still returning { ok: true } for the others let a client believe a destructive-adjacent
+  // configuration change (e.g. a new threshold) took effect when it didn't.
+  let roundedThreshold: number | undefined
+  if (body?.thresholdPercent !== undefined) {
+    if (typeof body.thresholdPercent !== 'number' || !Number.isFinite(body.thresholdPercent)) {
+      setResponseStatus(event, 400)
+      return { ok: false, message: 'thresholdPercent must be a finite number' }
+    }
+    roundedThreshold = Math.round(body.thresholdPercent)
+    if (roundedThreshold < 1 || roundedThreshold > 100) {
+      setResponseStatus(event, 400)
+      return { ok: false, message: 'thresholdPercent must round to 1-100' }
+    }
+  }
+
+  let roundedMax: number | undefined
+  if (body?.maxDeletesPerRun !== undefined) {
+    if (typeof body.maxDeletesPerRun !== 'number' || !Number.isFinite(body.maxDeletesPerRun)) {
+      setResponseStatus(event, 400)
+      return { ok: false, message: 'maxDeletesPerRun must be a finite number' }
+    }
+    roundedMax = Math.round(body.maxDeletesPerRun)
+    if (roundedMax < 0) {
+      setResponseStatus(event, 400)
+      return { ok: false, message: 'maxDeletesPerRun must round to 0 or more' }
+    }
+  }
+
+  const db = getDb()
   if (typeof body?.enabled === 'boolean') {
     upsert(db, 'reaping_auto_delete_enabled', body.enabled ? '1' : '0')
   }
-  // Round BEFORE validating, not after — validating the raw input let e.g. 0.4 pass a ">0" check
-  // and then round down to 0, which means "unlimited" for the cap and "delete at any usage" for the
-  // threshold. Validate the normalized integer that will actually be persisted.
-  if (typeof body?.thresholdPercent === 'number' && Number.isFinite(body.thresholdPercent)) {
-    const rounded = Math.round(body.thresholdPercent)
-    if (rounded >= 1 && rounded <= 100) upsert(db, 'reaping_disk_threshold_percent', String(rounded))
-  }
-  if (typeof body?.maxDeletesPerRun === 'number' && Number.isFinite(body.maxDeletesPerRun)) {
-    const rounded = Math.round(body.maxDeletesPerRun)
-    if (rounded >= 0) upsert(db, 'reaping_max_deletes_per_run', String(rounded))
-  }
+  if (roundedThreshold !== undefined) upsert(db, 'reaping_disk_threshold_percent', String(roundedThreshold))
+  if (roundedMax !== undefined) upsert(db, 'reaping_max_deletes_per_run', String(roundedMax))
 
   return { ok: true }
 })

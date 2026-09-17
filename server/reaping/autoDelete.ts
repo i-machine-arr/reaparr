@@ -6,13 +6,17 @@
 import { eq } from 'drizzle-orm'
 import type { getDb } from '../db/client'
 import { schema } from '../db/client'
-import { createSonarrClient, createRadarrClient, type ConnectionConfig, type NormalizedDiskSpace } from '../sources'
+import {
+  createSonarrClient, createRadarrClient, type ConnectionConfig, type NormalizedDiskSpace,
+  type SonarrClient, type RadarrClient
+} from '../sources'
 import { applyTransition } from './stateMachine'
 import { emailNotifier, type Notifier } from './notifier'
 import { runExclusive } from '../sync/exclusion'
 
 type Db = ReturnType<typeof getDb>
 type Title = typeof schema.title.$inferSelect
+type ArrSource = 'sonarr' | 'radarr'
 
 export interface AutoDeleteCounts {
   evaluated: number
@@ -50,19 +54,27 @@ function connConfig(row: { baseUrl: string | null, credential: string | null } |
   return { baseUrl: row.baseUrl, credential: row.credential }
 }
 
-// /api/v3/diskspace can report multiple mounts (Sonarr/Radarr have been seen returning /, /config,
-// /data as separate entries with no guaranteed order) — /api/v3/diskspace alone can't say which one
-// is the actual media root. Match against the real configured root folder path instead of blindly
-// taking the first entry.
 // Sonarr/Radarr can run natively on Windows too, not just Linux Docker — normalize backslashes to
-// forward slashes and compare case-insensitively so a drive-letter or UNC root folder still matches.
-function normalizePath(p: string): string {
-  return p.replace(/\\/g, '/').toLowerCase()
+// forward slashes so a UNC/drive-letter root folder still matches. Case is preserved for POSIX
+// paths (Linux is case-sensitive: /Media and /media can be genuinely different locations) and only
+// folded for Windows-shaped paths (drive letter or UNC), which are case-insensitive by convention.
+function isWindowsPath(p: string): boolean {
+  return /^[a-z]:[\\/]/i.test(p) || /^[\\/]{2}/.test(p)
 }
 
+function normalizePath(p: string, foldCase: boolean): string {
+  const withForwardSlashes = p.replace(/\\/g, '/')
+  return foldCase ? withForwardSlashes.toLowerCase() : withForwardSlashes
+}
+
+// /api/v3/diskspace can report multiple mounts (Sonarr/Radarr have been seen returning /, /config,
+// /data as separate entries with no guaranteed order) — it alone can't say which one is the actual
+// media root. Match against the real configured root folder path instead of blindly taking the
+// first entry.
 function isPathUnder(candidatePath: string, mountPath: string): boolean {
-  const candidate = normalizePath(candidatePath)
-  const mount = normalizePath(mountPath)
+  const foldCase = isWindowsPath(candidatePath) || isWindowsPath(mountPath)
+  const candidate = normalizePath(candidatePath, foldCase)
+  const mount = normalizePath(mountPath, foldCase)
   if (mount === '/') return true
   const normalized = mount.endsWith('/') ? mount.slice(0, -1) : mount
   return candidate === normalized || candidate.startsWith(`${normalized}/`)
@@ -83,6 +95,41 @@ function pickMediaDisk(disks: NormalizedDiskSpace[], rootFolderPaths: string[]):
   return best
 }
 
+interface SourceContext {
+  client: SonarrClient | RadarrClient
+  disk: NormalizedDiskSpace
+  freeSpace: number
+  // Set once a deletion's freed bytes couldn't be counted accurately (a file with an unknown size).
+  // freeSpace can no longer be trusted to reflect reality, so further titles for this source are
+  // left for the next run, which re-reads real disk space instead of continuing to estimate.
+  freeSpaceUnreliable: boolean
+}
+
+async function buildSourceContext(db: Db, source: ArrSource): Promise<SourceContext | null> {
+  const connRow = db.select().from(schema.sourceConnection).where(eq(schema.sourceConnection.source, source)).get()
+  const cfg = connConfig(connRow)
+  if (!cfg || connRow?.enabled !== 1) return null
+
+  const client = source === 'sonarr' ? createSonarrClient(cfg) : createRadarrClient(cfg)
+  let disks: NormalizedDiskSpace[]
+  let rootFolderPaths: string[]
+  try {
+    const results = await Promise.all([client.getDiskSpace(), client.getRootFolderPaths()])
+    disks = results[0]
+    rootFolderPaths = results[1]
+  } catch {
+    return null // can't read space for this source right now — try again next run
+  }
+  const disk = pickMediaDisk(disks, rootFolderPaths)
+  if (!disk || disk.totalSpace <= 0) return null // no verified media-root match — skip rather than guess
+
+  return { client, disk, freeSpace: disk.freeSpace, freeSpaceUnreliable: false }
+}
+
+function percentUsed(ctx: SourceContext): number {
+  return ((ctx.disk.totalSpace - ctx.freeSpace) / ctx.disk.totalSpace) * 100
+}
+
 async function runAutoDeletePassUnguarded(
   db: Db,
   now: number,
@@ -92,71 +139,60 @@ async function runAutoDeletePassUnguarded(
   const settings = getAutoDeleteSettings(db)
   if (!settings.enabled) return counts
 
+  // Sorted oldest-due-first across ALL sources together — this order is preserved through the
+  // single loop below so a global maxDeletesPerRun cap can't let a newer title from one source jump
+  // ahead of an older, more-overdue title from the other.
   const due = db.select().from(schema.title).where(eq(schema.title.state, 'due')).all()
+    .filter((t): t is Title & { source: ArrSource } => t.source === 'sonarr' || t.source === 'radarr')
     .sort((a, b) => (a.dueAt ?? '').localeCompare(b.dueAt ?? ''))
   if (due.length === 0) return counts
 
-  const bySource = new Map<'sonarr' | 'radarr', Title[]>()
-  for (const t of due) {
-    if (t.source !== 'sonarr' && t.source !== 'radarr') continue
-    const list = bySource.get(t.source) ?? []
-    list.push(t)
-    bySource.set(t.source, list)
+  // Build each present source's disk context once, up front, before processing any title.
+  const contexts = new Map<ArrSource, SourceContext>()
+  for (const source of new Set(due.map(t => t.source))) {
+    const ctx = await buildSourceContext(db, source)
+    if (!ctx) continue
+    if (percentUsed(ctx) < settings.thresholdPercent) {
+      counts.skippedUnderThreshold++
+      continue
+    }
+    contexts.set(source, ctx)
   }
 
   let totalDeletedThisRun = 0
   const capReached = () => settings.maxDeletesPerRun > 0 && totalDeletedThisRun >= settings.maxDeletesPerRun
 
-  for (const [source, titles] of bySource) {
+  for (const title of due) {
     if (capReached()) break
-    const connRow = db.select().from(schema.sourceConnection).where(eq(schema.sourceConnection.source, source)).get()
-    const cfg = connConfig(connRow)
-    if (!cfg || connRow?.enabled !== 1) continue
+    const ctx = contexts.get(title.source)
+    if (!ctx) continue // source disabled/unreachable, unresolvable disk, or already under threshold
+    if (ctx.freeSpaceUnreliable) continue // this source's free-space estimate is no longer trustworthy this run
+    if (percentUsed(ctx) < settings.thresholdPercent) continue // this source's pressure is already relieved
 
-    const client = source === 'sonarr' ? createSonarrClient(cfg) : createRadarrClient(cfg)
-    let disks: NormalizedDiskSpace[]
-    let rootFolderPaths: string[]
+    counts.evaluated++
     try {
-      const results = await Promise.all([client.getDiskSpace(), client.getRootFolderPaths()])
-      disks = results[0]
-      rootFolderPaths = results[1]
-    } catch {
-      continue // can't read space for this source right now — try again next run
-    }
-    const disk = pickMediaDisk(disks, rootFolderPaths)
-    if (!disk || disk.totalSpace <= 0) continue // no verified media-root match — skip rather than guess
-
-    let freeSpace = disk.freeSpace
-    const percentUsed = () => ((disk.totalSpace - freeSpace) / disk.totalSpace) * 100
-    if (percentUsed() < settings.thresholdPercent) {
-      counts.skippedUnderThreshold++
-      continue
-    }
-
-    for (const title of titles) {
-      if (capReached()) break
-      if (percentUsed() < settings.thresholdPercent) break // this source's pressure is already relieved
-      counts.evaluated++
-      try {
-        const result = source === 'sonarr'
-          ? await (client as ReturnType<typeof createSonarrClient>).deleteSeriesFiles(title.sourceId)
-          : await (client as ReturnType<typeof createRadarrClient>).deleteMovieFile(title.sourceId)
-        applyTransition(db, title.id, { to: 'removed', reason: 'auto_deleted', actor: { system: 'system' }, now })
-        // Counters update immediately after the deletion is recorded, regardless of whether the
-        // notification succeeds — a rejected notify() must not be able to hide a completed deletion
-        // from capReached(), or the pass could delete more than maxDeletesPerRun allows.
-        freeSpace += result.deletedBytes
-        totalDeletedThisRun++
-        counts.deleted++
-        try {
-          await notifier.notify(db, 'departed', { id: title.id, episode: title.episode, title: title.title, dueAt: title.dueAt }, now)
-        } catch (err) {
-          console.error(`[auto-delete] departed notification failed for title ${title.id}:`, (err as Error).message)
-        }
-      } catch (err) {
-        counts.failed++
-        console.error(`[auto-delete] failed to delete title ${title.id} (${title.title}) via ${source}:`, (err as Error).message)
+      const result = title.source === 'sonarr'
+        ? await (ctx.client as SonarrClient).deleteSeriesFiles(title.sourceId)
+        : await (ctx.client as RadarrClient).deleteMovieFile(title.sourceId)
+      applyTransition(db, title.id, { to: 'removed', reason: 'auto_deleted', actor: { system: 'system' }, now })
+      // Counters update immediately after the deletion is recorded, regardless of whether the
+      // notification succeeds — a rejected notify() must not be able to hide a completed deletion
+      // from capReached(), or the pass could delete more than maxDeletesPerRun allows.
+      if (result.unknownSize) {
+        ctx.freeSpaceUnreliable = true
+      } else {
+        ctx.freeSpace += result.deletedBytes
       }
+      totalDeletedThisRun++
+      counts.deleted++
+      try {
+        await notifier.notify(db, 'departed', { id: title.id, episode: title.episode, title: title.title, dueAt: title.dueAt }, now)
+      } catch (err) {
+        console.error(`[auto-delete] departed notification failed for title ${title.id}:`, (err as Error).message)
+      }
+    } catch (err) {
+      counts.failed++
+      console.error(`[auto-delete] failed to delete title ${title.id} (${title.title}) via ${title.source}:`, (err as Error).message)
     }
   }
 

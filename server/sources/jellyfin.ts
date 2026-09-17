@@ -152,11 +152,11 @@ export function createJellyfinClient(config: ConnectionConfig): MediaServerClien
         items
           .map((t) => {
             const jellyfinType = t.mediaType === 'series' ? 'Series' : 'Movie'
-            return t.tvdbId
-              ? byTvdb.get(`${jellyfinType}:${t.tvdbId}`)
-              : t.tmdbId
-                ? byTmdb.get(`${jellyfinType}:${t.tmdbId}`)
-                : undefined
+            // Try tvdb first, but fall back to tmdb if the target has both ids and only the tvdb
+            // lookup misses — a target with a real tmdb match shouldn't be dropped just because it
+            // also carries a tvdb id that happens not to resolve in this library.
+            const tvdbMatch = t.tvdbId ? byTvdb.get(`${jellyfinType}:${t.tvdbId}`) : undefined
+            return tvdbMatch ?? (t.tmdbId ? byTmdb.get(`${jellyfinType}:${t.tmdbId}`) : undefined)
           })
           .filter((id): id is string => id != null)
       )
