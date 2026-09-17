@@ -11,6 +11,7 @@ import {
 } from '../sources'
 import { persistBundle, type SyncBundle } from './persist'
 import { runReapingTick } from '../reaping/tick'
+import { syncLeavingSoon } from '../reaping/leavingSoon'
 
 export interface SyncResult {
   runId: number
@@ -129,6 +130,13 @@ async function doRun(now: number): Promise<SyncResult> {
     counts = { ...fetched, ...(await persistBundle(bundle, now)) }
     // Advance the reaping clock (auto-reprieve on watch, due flip, opt-in reminder).
     counts = { ...counts, reaping: await runReapingTick(getDb(), now) }
+    // Keep the media server's Leaving Soon collection in sync with the grace window (docs/adr/0008).
+    // A failure here shouldn't fail the whole sync — the next run just re-derives and retries.
+    try {
+      counts = { ...counts, leavingSoon: await syncLeavingSoon(getDb(), now) }
+    } catch (err) {
+      errors.leavingSoon = (err as Error).message
+    }
   } catch (err) {
     errors.persist = (err as Error).message
     status = 'error'
