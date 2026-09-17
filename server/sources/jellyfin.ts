@@ -140,6 +140,13 @@ export function createJellyfinClient(config: ConnectionConfig): MediaServerClien
       if (!libraryUser) return // no user to enumerate the library through yet
 
       const library = await getLibraryItems(config, libraryUser.Id)
+      // Fetch-guard, same principle as the sync pipeline's own (docs/adr/0002): a validly-shaped but
+      // empty library response is indistinguishable from a transient/erroneous one (a real Jellyfin
+      // server having zero movies or series at all is not a realistic steady state). Trusting it
+      // would compute an empty desiredIds regardless of how many real targets were passed in, and
+      // remove every existing Leaving Soon member. Bail out and leave the collection untouched
+      // rather than treat "fetched nothing" as "wants nothing."
+      if (library.length === 0) return
       // Keyed by mediaType + provider id, not id alone — an unkeyed map risks a cross-type collision
       // (a movie and a series coincidentally sharing a raw tmdb/tvdb id) silently adding the wrong item.
       const byTmdb = new Map(
