@@ -11,7 +11,8 @@ import type {
 const AUTH: AuthInjection = { kind: 'header', name: 'X-Emby-Token' }
 const COLLECTION_NAME = 'Leaving Soon'
 
-interface JellyfinUser { Id: string, Name?: string }
+interface JellyfinUserPolicy { IsAdministrator?: boolean, EnableAllFolders?: boolean }
+interface JellyfinUser { Id: string, Name?: string, Policy?: JellyfinUserPolicy }
 interface JellyfinProviderIds { Tmdb?: string, Tvdb?: string, Imdb?: string }
 interface JellyfinUserData { Played?: boolean, LastPlayedDate?: string }
 interface JellyfinItem {
@@ -35,20 +36,50 @@ async function getUsers(config: ConnectionConfig): Promise<JellyfinUser[]> {
   return (await sourceFetch<JellyfinUser[]>(config, AUTH, '/Users')) ?? []
 }
 
-// One call, cached per-invocation: every Movie/Series with its provider ids, used both to translate
-// tmdb/tvdb ids to Jellyfin item ids (Leaving Soon) and to read watch state (history).
+// Reconciliation needs one consistent "what's actually in the library" view. users[0] is arbitrary —
+// if that account lacks folder access, items it can't see would look like they don't exist and get
+// dropped from Leaving Soon. Prefer a verified admin with full folder access; only fall back to the
+// first user if the server genuinely has no such account (better than refusing to sync at all).
+function pickLibraryUser(users: JellyfinUser[]): JellyfinUser | undefined {
+  return users.find(u => u.Policy?.IsAdministrator && u.Policy?.EnableAllFolders) ?? users[0]
+}
+
+// Validates the shape rather than defaulting to [] on anything unexpected: a malformed (non-array)
+// or falsy-but-present Items would otherwise look identical to "library is genuinely empty," and an
+// empty result here means syncLeavingSoonCollection removes every real collection member.
+function assertItemsResponse<T extends { Id: string }>(res: JellyfinItemsResponse<T> | undefined): T[] {
+  if (res === undefined) return [] // sourceFetch returns undefined for a genuinely empty response body
+  if (!Array.isArray(res.Items) || res.Items.some(item => typeof item?.Id !== 'string')) {
+    throw new Error('Invalid Jellyfin items response')
+  }
+  return res.Items
+}
+
+// Movie,Series only — used for collection membership matching (syncLeavingSoonCollection), where a
+// series is matched/added as one unit, not per episode.
 async function getLibraryItems(config: ConnectionConfig, userId: string): Promise<JellyfinItem[]> {
   const res = await sourceFetch<JellyfinItemsResponse>(config, AUTH, `/Users/${userId}/Items`, {
     query: { Recursive: 'true', IncludeItemTypes: 'Movie,Series', Fields: 'ProviderIds' }
   })
-  return res?.Items ?? []
+  return assertItemsResponse(res)
+}
+
+// Movie,Episode — used for watch history. IncludeItemTypes: 'Movie,Series' (getLibraryItems) would
+// report a whole series as one played/unplayed item, collapsing every episode into a single history
+// row and undercounting completion; querying episodes directly keeps one row per watched episode,
+// each carrying its own series id as grandparentRatingKey.
+async function getHistoryItems(config: ConnectionConfig, userId: string): Promise<JellyfinItem[]> {
+  const res = await sourceFetch<JellyfinItemsResponse>(config, AUTH, `/Users/${userId}/Items`, {
+    query: { Recursive: 'true', IncludeItemTypes: 'Movie,Episode', Fields: 'ProviderIds' }
+  })
+  return assertItemsResponse(res)
 }
 
 async function findCollectionId(config: ConnectionConfig): Promise<string | null> {
   const res = await sourceFetch<JellyfinItemsResponse<{ Id: string, Name?: string }>>(config, AUTH, '/Items', {
     query: { IncludeItemTypes: 'BoxSet', Recursive: 'true' }
   })
-  const found = (res?.Items ?? []).find(i => i.Name === COLLECTION_NAME)
+  const found = assertItemsResponse(res).find(i => i.Name === COLLECTION_NAME)
   return found?.Id ?? null
 }
 
@@ -74,17 +105,18 @@ export function createJellyfinClient(config: ConnectionConfig): MediaServerClien
       const users = await getUsers(config)
       const out: NormalizedHistoryRow[] = []
       for (const user of users) {
-        const items = await getLibraryItems(config, user.Id)
+        const items = await getHistoryItems(config, user.Id)
         for (const item of items) {
           if (!item.UserData?.Played) continue
+          const isEpisode = item.Type === 'Episode'
           out.push({
             lastWatchedAt: item.UserData.LastPlayedDate ?? null,
             userId: user.Id,
             username: user.Name ?? null,
             friendlyName: user.Name ?? null,
-            mediaType: item.Type === 'Series' ? 'episode' : 'movie',
+            mediaType: isEpisode ? 'episode' : 'movie',
             ratingKey: item.Id,
-            grandparentRatingKey: item.Type === 'Series' ? item.Id : null,
+            grandparentRatingKey: isEpisode ? (item.SeriesId ?? null) : null,
             watchedStatus: 1,
             percentComplete: 100
           })
@@ -104,15 +136,28 @@ export function createJellyfinClient(config: ConnectionConfig): MediaServerClien
     },
     async syncLeavingSoonCollection(items: LeavingSoonTarget[]): Promise<void> {
       const users = await getUsers(config)
-      const firstUser = users[0]
-      if (!firstUser) return // no admin user to enumerate the library through yet
+      const libraryUser = pickLibraryUser(users)
+      if (!libraryUser) return // no user to enumerate the library through yet
 
-      const library = await getLibraryItems(config, firstUser.Id)
-      const byTmdb = new Map(library.filter(i => i.ProviderIds?.Tmdb).map(i => [i.ProviderIds!.Tmdb, i.Id]))
-      const byTvdb = new Map(library.filter(i => i.ProviderIds?.Tvdb).map(i => [i.ProviderIds!.Tvdb, i.Id]))
+      const library = await getLibraryItems(config, libraryUser.Id)
+      // Keyed by mediaType + provider id, not id alone — an unkeyed map risks a cross-type collision
+      // (a movie and a series coincidentally sharing a raw tmdb/tvdb id) silently adding the wrong item.
+      const byTmdb = new Map(
+        library.filter(i => i.ProviderIds?.Tmdb).map(i => [`${i.Type}:${i.ProviderIds!.Tmdb}`, i.Id])
+      )
+      const byTvdb = new Map(
+        library.filter(i => i.ProviderIds?.Tvdb).map(i => [`${i.Type}:${i.ProviderIds!.Tvdb}`, i.Id])
+      )
       const desiredIds = new Set(
         items
-          .map(t => (t.tvdbId ? byTvdb.get(String(t.tvdbId)) : t.tmdbId ? byTmdb.get(String(t.tmdbId)) : undefined))
+          .map((t) => {
+            const jellyfinType = t.mediaType === 'series' ? 'Series' : 'Movie'
+            return t.tvdbId
+              ? byTvdb.get(`${jellyfinType}:${t.tvdbId}`)
+              : t.tmdbId
+                ? byTmdb.get(`${jellyfinType}:${t.tmdbId}`)
+                : undefined
+          })
           .filter((id): id is string => id != null)
       )
 
@@ -129,7 +174,7 @@ export function createJellyfinClient(config: ConnectionConfig): MediaServerClien
       const currentRes = await sourceFetch<JellyfinItemsResponse<{ Id: string }>>(config, AUTH, '/Items', {
         query: { ParentId: collectionId }
       })
-      const currentIds = new Set((currentRes?.Items ?? []).map(i => i.Id))
+      const currentIds = new Set(assertItemsResponse(currentRes).map(i => i.Id))
 
       const toAdd = [...desiredIds].filter(id => !currentIds.has(id))
       const toRemove = [...currentIds].filter(id => !desiredIds.has(id))

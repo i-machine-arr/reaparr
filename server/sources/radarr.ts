@@ -66,18 +66,23 @@ export function createRadarrClient(config: ConnectionConfig): RadarrClient {
         totalSpace: d.totalSpace ?? 0
       }))
     },
+    async getRootFolderPaths(): Promise<string[]> {
+      const folders = await sourceFetch<{ path: string }[]>(config, AUTH, '/api/v3/rootfolder')
+      return (folders ?? []).map(f => f.path)
+    },
     async deleteMovieFile(movieId: number): Promise<DeleteFileResult> {
       const movie = await sourceFetch<Record<string, unknown> & { movieFile?: { id: number, size?: number } }>(
         config, AUTH, `/api/v3/movie/${movieId}`
       )
       if (!movie?.movieFile) return { deletedBytes: 0 }
       const deletedBytes = movie.movieFile.size ?? 0
-      await sourceFetch(config, AUTH, `/api/v3/moviefile/${movie.movieFile.id}`, { method: 'DELETE' })
-      // Unmonitor so Radarr doesn't immediately re-grab what we just deleted — same reasoning as
-      // Sonarr's deleteSeriesFiles.
+      const movieFileId = movie.movieFile.id
+      // Unmonitor BEFORE deleting the file, not after — same reasoning as Sonarr's
+      // deleteSeriesFiles: a successful DELETE followed by a failed PUT would leave the movie
+      // monitored with its file gone, and Radarr would immediately re-grab it.
       movie.monitored = false
-      delete movie.movieFile
       await sourceFetch(config, AUTH, `/api/v3/movie/${movieId}`, { method: 'PUT', body: movie })
+      await sourceFetch(config, AUTH, `/api/v3/moviefile/${movieFileId}`, { method: 'DELETE' })
       return { deletedBytes }
     }
   }

@@ -86,21 +86,27 @@ export function createSonarrClient(config: ConnectionConfig): SonarrClient {
         totalSpace: d.totalSpace ?? 0
       }))
     },
+    async getRootFolderPaths(): Promise<string[]> {
+      const folders = await sourceFetch<{ path: string }[]>(config, AUTH, '/api/v3/rootfolder')
+      return (folders ?? []).map(f => f.path)
+    },
     async deleteSeriesFiles(seriesId: number): Promise<DeleteFileResult> {
       const files = await sourceFetch<SonarrEpisodeFile[]>(config, AUTH, '/api/v3/episodefile', {
         query: { seriesId }
       })
-      let deletedBytes = 0
-      for (const f of files ?? []) {
-        deletedBytes += f.size ?? 0
-        await sourceFetch(config, AUTH, `/api/v3/episodefile/${f.id}`, { method: 'DELETE' })
-      }
-      // Unmonitor so Sonarr doesn't immediately re-grab what we just deleted — re-acquisition is
-      // expected to happen via the downstream placeholder tool's play-triggered re-request instead.
+      // Unmonitor BEFORE deleting files, not after — a successful DELETE followed by a failed PUT
+      // would leave the series monitored with its files gone, and Sonarr would immediately re-grab
+      // what was just deleted. Re-acquisition is expected to happen via the downstream placeholder
+      // tool's play-triggered re-request instead.
       const series = await sourceFetch<Record<string, unknown>>(config, AUTH, `/api/v3/series/${seriesId}`)
       if (series) {
         series.monitored = false
         await sourceFetch(config, AUTH, `/api/v3/series/${seriesId}`, { method: 'PUT', body: series })
+      }
+      let deletedBytes = 0
+      for (const f of files ?? []) {
+        deletedBytes += f.size ?? 0
+        await sourceFetch(config, AUTH, `/api/v3/episodefile/${f.id}`, { method: 'DELETE' })
       }
       return { deletedBytes }
     }

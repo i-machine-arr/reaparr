@@ -68,7 +68,46 @@ reuse.
 - The disk-threshold gate is a second, independent safety rail on top of the existing age+watched
   eligibility scoring and the grace/appeal workflow — a title only gets deleted once it has cleared
   all three, not just one.
-- v1 uses the first root folder an *arr instance reports; multi-root-folder aggregation for an
-  instance spanning physically distinct disks is a known simplification, not silently wrong.
+- v1 matches the configured root folder's path against `/api/v3/diskspace`'s entries (longest-prefix
+  match) rather than guessing the first entry — real Sonarr/Radarr can report unrelated mounts
+  (`/`, `/config`) alongside the actual media disk, with no guaranteed order. Multi-root-folder
+  aggregation for an instance spanning multiple *distinct* media disks is still a known simplification
+  (single configured root folder assumed), not silently wrong for the common single-disk case.
 - Plex and Emby users get watch-history/eligibility scoring today (unaffected by this change) but not
   Leaving Soon visibility until Phase 2 lands.
+
+## Post-review hardening
+
+A CodeRabbit pass on the initial PR caught several real correctness/safety gaps, fixed before merge:
+
+- **Cross-workflow exclusion** (`server/sync/exclusion.ts`): Nitro runs same-cron-minute scheduled
+  tasks in parallel with no ordering guarantee between separate schedule entries. `runSync` and
+  `runAutoDeletePass` now both go through a shared FIFO queue so a sync's reaping tick (which can
+  auto-reprieve or resurrect a title) can never run concurrently with auto-delete acting on a stale
+  snapshot of that same title.
+- **Unmonitor before delete, not after** (`sonarr.ts`/`radarr.ts`): a successful file DELETE followed
+  by a failed unmonitor PUT would leave the item monitored with its file gone — the *arr would
+  immediately re-grab what was just deleted. Reordered so the PUT happens first.
+- **Settings validation order** (`auto-delete.put.ts`): validating the raw input before rounding let
+  e.g. `0.4` pass a `>0` check and then round down to `0`, which means "unlimited" for the per-run cap
+  and "delete at any usage" for the threshold — silently defeating both safety limits. Now rounds
+  first, validates the normalized integer.
+- **Notification ordering** (`autoDelete.ts`): a rejected `departed` notification used to prevent the
+  deletion counters from incrementing, which let `maxDeletesPerRun` be silently bypassed. Counters now
+  update immediately after the deletion is recorded; the notification runs in its own try/catch.
+- **Jellyfin history granularity**: querying `Movie,Series` for watch history collapsed an entire
+  watched series into one history row instead of one per episode, undercounting completion. History
+  now queries `Movie,Episode` separately; `Movie,Series` is kept for collection matching only.
+- **Jellyfin library user selection**: `syncLeavingSoonCollection` used to enumerate the library
+  through whichever user happened to be first, which could be a restricted account missing real
+  items from `desiredIds` and incorrectly dropping them from the collection. Now prefers a verified
+  administrator with full folder access.
+- **Jellyfin provider-ID matching**: tmdb/tvdb lookup maps are now keyed by media type as well as id,
+  preventing a cross-type id collision (a movie and series coincidentally sharing a raw provider id)
+  from matching the wrong item.
+- **Jellyfin response validation**: a malformed (non-array) `Items` response used to be silently
+  treated the same as a genuinely empty library, which could wipe the whole Leaving Soon collection.
+  Malformed responses now throw instead of returning `[]`.
+- **Jellyfin sync error surfacing** (`run.ts`): a Leaving Soon failure was only recorded under
+  `errors.leavingSoon`, but the per-source status loop reads `errors[c.source]` — the Jellyfin
+  connection incorrectly showed "ok" in Settings even after a real failure. Now recorded under both.

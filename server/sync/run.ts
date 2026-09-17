@@ -12,6 +12,7 @@ import {
 import { persistBundle, type SyncBundle } from './persist'
 import { runReapingTick } from '../reaping/tick'
 import { syncLeavingSoon } from '../reaping/leavingSoon'
+import { runExclusive } from './exclusion'
 
 export interface SyncResult {
   runId: number
@@ -33,7 +34,9 @@ export function isSyncRunning(): boolean {
 
 export async function runSync(now: number = Date.now()): Promise<SyncResult> {
   if (_running) return _running
-  _running = doRun(now).finally(() => {
+  // De-dupes concurrent calls to runSync itself (e.g. two "Sync now" clicks); runExclusive (below)
+  // separately keeps this from overlapping runAutoDeletePass, a different workflow entirely.
+  _running = runExclusive(() => doRun(now)).finally(() => {
     _running = null
   })
   return _running
@@ -135,7 +138,12 @@ async function doRun(now: number): Promise<SyncResult> {
     try {
       counts = { ...counts, leavingSoon: await syncLeavingSoon(getDb(), now) }
     } catch (err) {
-      errors.leavingSoon = (err as Error).message
+      const message = (err as Error).message
+      errors.leavingSoon = message
+      // Also record under errors.jellyfin (not just errors.leavingSoon) — the per-source status
+      // loop below reads errors[c.source], so without this a failed Leaving Soon sync left the
+      // Jellyfin connection showing 'ok' in Settings, clearing whatever real error was there.
+      errors.jellyfin = message
     }
   } catch (err) {
     errors.persist = (err as Error).message

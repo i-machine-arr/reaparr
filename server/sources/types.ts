@@ -110,11 +110,16 @@ export interface SourceClient {
 export interface SonarrClient extends SourceClient {
   getSeries(): Promise<NormalizedSeries[]>
   getDiskSpace(): Promise<NormalizedDiskSpace[]>
+  // The configured root folder path(s) — /api/v3/diskspace alone doesn't say which of its entries is
+  // actually the media root (Sonarr can report /, /config, /data as separate entries with no
+  // guaranteed order); this is what lets a caller match the right one.
+  getRootFolderPaths(): Promise<string[]>
   deleteSeriesFiles(seriesId: number): Promise<DeleteFileResult>
 }
 export interface RadarrClient extends SourceClient {
   getMovies(): Promise<NormalizedMovie[]>
   getDiskSpace(): Promise<NormalizedDiskSpace[]>
+  getRootFolderPaths(): Promise<string[]>
   deleteMovieFile(movieId: number): Promise<DeleteFileResult>
 }
 export interface SeerrClient extends SourceClient {

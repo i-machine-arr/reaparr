@@ -127,6 +127,9 @@ async function handle(req, res) {
   if (path === '/api/v3/diskspace') {
     return send(res, 200, [{ path: '/data', freeSpace: rootFree, totalSpace: rootTotal }])
   }
+  if (path === '/api/v3/rootfolder') {
+    return send(res, 200, [{ path: '/data' }])
+  }
   if (path === '/api/v3/episodefile') {
     const seriesId = Number(q.get('seriesId'))
     return send(res, 200, episodeFilesBySeries.get(seriesId) ?? [])
@@ -195,7 +198,7 @@ async function handle(req, res) {
     return send(res, 200, { Version: VERSION })
   }
   if (path === '/Users' && !path.includes('/Items')) {
-    return send(res, 200, [{ Id: JELLYFIN_USER_ID, Name: 'admin' }])
+    return send(res, 200, [{ Id: JELLYFIN_USER_ID, Name: 'admin', Policy: { IsAdministrator: true, EnableAllFolders: true } }])
   }
   {
     const m = /^\/Users\/[^/]+\/Items$/.exec(path)

@@ -27,6 +27,11 @@ export default defineNuxtConfig({
     experimental: {
       tasks: true
     },
+    // Nitro runs same-cron-minute tasks in parallel with no ordering between separate schedule
+    // entries (verified against Nitro's source) — daily-sync (03:00) and space-check (hourly, so it
+    // also fires at 03:00) could otherwise overlap. There's no config option here to prevent that;
+    // the actual exclusion is server/sync/exclusion.ts's runExclusive, used by both runSync and
+    // runAutoDeletePass so they never execute concurrently regardless of which triggered them.
     scheduledTasks: {
       // Daily sync at 03:00 (D-6). Manual "Sync now" covers on-demand refresh.
       '0 3 * * *': ['daily-sync'],

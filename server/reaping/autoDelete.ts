@@ -6,9 +6,10 @@
 import { eq } from 'drizzle-orm'
 import type { getDb } from '../db/client'
 import { schema } from '../db/client'
-import { createSonarrClient, createRadarrClient, type ConnectionConfig } from '../sources'
+import { createSonarrClient, createRadarrClient, type ConnectionConfig, type NormalizedDiskSpace } from '../sources'
 import { applyTransition } from './stateMachine'
 import { emailNotifier, type Notifier } from './notifier'
+import { runExclusive } from '../sync/exclusion'
 
 type Db = ReturnType<typeof getDb>
 type Title = typeof schema.title.$inferSelect
@@ -49,10 +50,31 @@ function connConfig(row: { baseUrl: string | null, credential: string | null } |
   return { baseUrl: row.baseUrl, credential: row.credential }
 }
 
-export async function runAutoDeletePass(
+// /api/v3/diskspace can report multiple mounts (Sonarr/Radarr have been seen returning /, /config,
+// /data as separate entries with no guaranteed order) — /api/v3/diskspace alone can't say which one
+// is the actual media root. Match against the real configured root folder path instead of blindly
+// taking the first entry.
+function isPathUnder(candidatePath: string, mountPath: string): boolean {
+  if (mountPath === '/') return true
+  const normalized = mountPath.endsWith('/') ? mountPath.slice(0, -1) : mountPath
+  return candidatePath === normalized || candidatePath.startsWith(`${normalized}/`)
+}
+
+function pickMediaDisk(disks: NormalizedDiskSpace[], rootFolderPaths: string[]): NormalizedDiskSpace | null {
+  const rootPath = rootFolderPaths[0] // v1 simplification (docs/adr/0008): single configured root folder
+  if (!rootPath) return null
+  let best: NormalizedDiskSpace | null = null
+  for (const d of disks) {
+    if (!isPathUnder(rootPath, d.path)) continue
+    if (!best || d.path.length > best.path.length) best = d
+  }
+  return best
+}
+
+async function runAutoDeletePassUnguarded(
   db: Db,
-  now: number = Date.now(),
-  notifier: Notifier = emailNotifier
+  now: number,
+  notifier: Notifier
 ): Promise<AutoDeleteCounts> {
   const counts: AutoDeleteCounts = { evaluated: 0, deleted: 0, failed: 0, skippedUnderThreshold: 0 }
   const settings = getAutoDeleteSettings(db)
@@ -80,17 +102,20 @@ export async function runAutoDeletePass(
     if (!cfg || connRow?.enabled !== 1) continue
 
     const client = source === 'sonarr' ? createSonarrClient(cfg) : createRadarrClient(cfg)
-    let folders
+    let disks: NormalizedDiskSpace[]
+    let rootFolderPaths: string[]
     try {
-      folders = await client.getDiskSpace()
+      const results = await Promise.all([client.getDiskSpace(), client.getRootFolderPaths()])
+      disks = results[0]
+      rootFolderPaths = results[1]
     } catch {
       continue // can't read space for this source right now — try again next run
     }
-    const folder = folders[0]
-    if (!folder || folder.totalSpace <= 0) continue
+    const disk = pickMediaDisk(disks, rootFolderPaths)
+    if (!disk || disk.totalSpace <= 0) continue // no verified media-root match — skip rather than guess
 
-    let freeSpace = folder.freeSpace
-    const percentUsed = () => ((folder.totalSpace - freeSpace) / folder.totalSpace) * 100
+    let freeSpace = disk.freeSpace
+    const percentUsed = () => ((disk.totalSpace - freeSpace) / disk.totalSpace) * 100
     if (percentUsed() < settings.thresholdPercent) {
       counts.skippedUnderThreshold++
       continue
@@ -105,10 +130,17 @@ export async function runAutoDeletePass(
           ? await (client as ReturnType<typeof createSonarrClient>).deleteSeriesFiles(title.sourceId)
           : await (client as ReturnType<typeof createRadarrClient>).deleteMovieFile(title.sourceId)
         applyTransition(db, title.id, { to: 'removed', reason: 'auto_deleted', actor: { system: 'system' }, now })
-        await notifier.notify(db, 'departed', { id: title.id, episode: title.episode, title: title.title, dueAt: title.dueAt }, now)
+        // Counters update immediately after the deletion is recorded, regardless of whether the
+        // notification succeeds — a rejected notify() must not be able to hide a completed deletion
+        // from capReached(), or the pass could delete more than maxDeletesPerRun allows.
         freeSpace += result.deletedBytes
         totalDeletedThisRun++
         counts.deleted++
+        try {
+          await notifier.notify(db, 'departed', { id: title.id, episode: title.episode, title: title.title, dueAt: title.dueAt }, now)
+        } catch (err) {
+          console.error(`[auto-delete] departed notification failed for title ${title.id}:`, (err as Error).message)
+        }
       } catch (err) {
         counts.failed++
         console.error(`[auto-delete] failed to delete title ${title.id} (${title.title}) via ${source}:`, (err as Error).message)
@@ -117,4 +149,14 @@ export async function runAutoDeletePass(
   }
 
   return counts
+}
+
+export async function runAutoDeletePass(
+  db: Db,
+  now: number = Date.now(),
+  notifier: Notifier = emailNotifier
+): Promise<AutoDeleteCounts> {
+  // Never overlaps a sync run (docs/adr/0008) — a sync's reaping tick can auto-reprieve or resurrect
+  // a title at the exact moment this pass is mid-deletion against a stale snapshot of it.
+  return runExclusive(() => runAutoDeletePassUnguarded(db, now, notifier))
 }
