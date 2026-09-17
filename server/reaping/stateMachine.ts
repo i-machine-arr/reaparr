@@ -19,6 +19,7 @@ export type TransitionReason
     | 'auto_reprieve_watched'
     | 'grace_elapsed'
     | 'admin_marked_removed'
+    | 'auto_deleted'
     | 'sync_confirmed_removed'
     | 'resurrected'
 
@@ -30,7 +31,7 @@ export type Actor = { personId: number } | { system: 'sync' | 'system' | 'operat
 
 export const REASONS: ReadonlySet<string> = new Set<TransitionReason>([
   'admin_scheduled', 'member_appealed', 'appeal_granted', 'appeal_denied', 'appeal_withdrawn', 'admin_cancelled',
-  'auto_reprieve_watched', 'grace_elapsed', 'admin_marked_removed', 'sync_confirmed_removed', 'resurrected'
+  'auto_reprieve_watched', 'grace_elapsed', 'admin_marked_removed', 'auto_deleted', 'sync_confirmed_removed', 'resurrected'
 ])
 
 // Allowed (from → to) edges. reprieve and resurrection are transitions, not states.
