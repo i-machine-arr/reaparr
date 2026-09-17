@@ -60,7 +60,10 @@ def get_staged_diff() -> str:
 def main():
     try:
         data = json.load(sys.stdin)
-        command = data.get("command", "")
+        # A PreToolUse hook matched on Bash receives the command nested at tool_input.command, not
+        # top-level — reading the top-level key always returned "", so this check silently no-op'd
+        # on every single commit since the template was written.
+        command = data.get("tool_input", {}).get("command", "")
     except json.JSONDecodeError:
         sys.exit(0)
 

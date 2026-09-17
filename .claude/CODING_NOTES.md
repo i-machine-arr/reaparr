@@ -18,6 +18,15 @@ reviews catch them.
 - **Keep lines under 120 characters.** Long lines are hard to review side-by-side in a diff or split editor pane, and tend to signal a line doing too many things at once.
 - **Comments explain *why*, not *what*.** The code already shows what it does — a comment worth writing covers intent, a hidden constraint, or a gotcha a future reader would otherwise have to rediscover the hard way. This matches the upstream project's own convention (see root `CLAUDE.md`), just stated generally here.
 
+## Claude Code Hooks
+
+- **A `PreToolUse` hook matched on Bash gets the command at `tool_input.command`, not top-level `command`.** The template's own `pre_commit_sp_check.py` read the wrong field and silently no-op'd on every commit since it was written — caught by CodeRabbit on this repo's own template-seeding PR (#2). Likely broken the same way in every other repo seeded from `i-machine-things/.claude` before this fix; worth syncing back.
+
+## Release Process
+
+- **`git describe --tags --abbrev=0` needs a `v*` match filter and a root-commit fallback.** With no filter it can select a non-version tag; with zero tags (a repo's first release) it fails outright. Use `git describe --tags --match 'v*' --abbrev=0 2>/dev/null || git rev-list --max-parents=0 main`.
+- **The "Automatic Version Bump Triggers" section must never bypass Rule 6.** The template's original wording said "tag and push" directly off a commit-count threshold, contradicting Rule 6's explicit human-sign-off requirement one section above it. The threshold is a recommendation to report, not an action to take.
+
 ## reaparr-specific
 
 - **Real *arr API responses can silently differ from assumed shapes.** `/api/v3/rootfolder` does not report `totalSpace` on real Sonarr/Radarr — only `/api/v3/diskspace` does. Caught by testing against a real instance, not the mock server, on the very first feature built in this fork. Always verify a new adapter method's real response shape before trusting it, per Rule 3.
