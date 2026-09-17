@@ -29,7 +29,10 @@ export default defineNuxtConfig({
     },
     scheduledTasks: {
       // Daily sync at 03:00 (D-6). Manual "Sync now" covers on-demand refresh.
-      '0 3 * * *': ['daily-sync']
+      '0 3 * * *': ['daily-sync'],
+      // Hourly disk-threshold check (docs/adr/0008) — deliberately more frequent than the daily
+      // sync, since disk pressure can't wait a day to be noticed.
+      '0 * * * *': ['space-check']
     }
   },
 
