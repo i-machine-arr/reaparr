@@ -63,6 +63,14 @@ export function resolveTrustedIp(directPeer: string | undefined, forwardedFor: s
 
 // Throws (sends a 401) unless the request is from a local address or carries a valid X-Api-Key
 // header matching the app's own generated key.
+//
+// NOTE for local testing: `nuxt dev` runs requests through Vite's dev middleware, which does not
+// expose a real raw socket (getRequestIP(event) with no options returns undefined there) and can
+// inject its own synthetic X-Forwarded-For for internal proxying — this guard will see no usable
+// direct peer and require the API key even from localhost. This is a `nuxt dev`-only artifact, not
+// a bug: verified correct against the real production build (`node .output/server/index.mjs`,
+// what actually ships per the Dockerfile), where the raw socket resolves properly and local access
+// works as intended. Test this guard's behavior against a build, not `nuxt dev`.
 export function requireLocalOrApiKey(event: H3Event): void {
   const directPeer = getRequestIP(event) // raw socket peer — never trusts any header
   // Parsed directly rather than via getRequestIP's own xForwardedFor option, to control exactly
