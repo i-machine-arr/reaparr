@@ -6,10 +6,10 @@
 // concern upstream already deferred; it closes the specific gap of a bulk-destructive action being
 // reachable from outside the trusted network with zero check at all.
 //
-// Caveat inherited from the same model Sonarr/Radarr use: if this app sits behind a reverse proxy,
-// the "local" determination is only as trustworthy as X-Forwarded-For, which an external client can
-// forge unless the proxy strips/overwrites it before forwarding. Deploy behind a proxy that does so
-// (Nginx Proxy Manager does, by default) if exposing this beyond a fully trusted LAN.
+// X-Forwarded-For is never trusted blindly (that would be a CWE-346 origin-validation bypass — an
+// external caller could just claim to be 127.0.0.1): a forwarded address only counts when the
+// DIRECT TCP peer is itself already local, i.e. the request could only have arrived via a proxy on
+// the trusted network. See resolveTrustedIp below.
 
 import { getDb, schema } from '../db/client'
 import { randomBytes } from 'node:crypto'
@@ -34,11 +34,12 @@ export function regenerateApiKey(db: ReturnType<typeof getDb> = getDb()): string
   return key
 }
 
-// RFC 1918 / loopback / link-local / unique-local ranges, plus their IPv4-mapped-IPv6 forms.
+// RFC 1918 / loopback / link-local (full fe80::/10, not just the fe80 prefix) / unique-local
+// ranges, plus their IPv4-mapped-IPv6 forms.
 export function isLocalAddress(ip: string): boolean {
   const addr = ip.replace(/^::ffff:/i, '')
   if (addr === '::1' || addr === '127.0.0.1' || addr.startsWith('127.')) return true
-  if (addr === '::' || addr.toLowerCase().startsWith('fe80:') || addr.toLowerCase().startsWith('fc') || addr.toLowerCase().startsWith('fd')) return true
+  if (addr === '::' || /^fe[89ab][0-9a-f]:/i.test(addr) || addr.toLowerCase().startsWith('fc') || addr.toLowerCase().startsWith('fd')) return true
   if (/^10\./.test(addr)) return true
   if (/^192\.168\./.test(addr)) return true
   const m = /^172\.(\d{1,3})\./.exec(addr)
@@ -46,10 +47,29 @@ export function isLocalAddress(ip: string): boolean {
   return false
 }
 
+// The actual trust decision, pulled out as a pure function so it's testable without a real H3Event:
+// only trust an X-Forwarded-For value when the DIRECT TCP peer is itself local — i.e. this process
+// is only reachable via a proxy on the trusted network, matching the deployment this app assumes
+// (Docker + Nginx Proxy Manager on the same LAN/host, per ADR-0008). An external client can put
+// anything in X-Forwarded-For, including "127.0.0.1", but they cannot fake which socket the OS
+// actually accepted their TCP connection on — so a non-local direct peer is trusted as exactly what
+// it is (external) regardless of what the header claims, closing the bypass a naive
+// getRequestIP(event, { xForwardedFor: true }) call would allow.
+export function resolveTrustedIp(directPeer: string | undefined, forwardedFor: string | undefined): string | undefined {
+  if (!directPeer) return undefined
+  if (!isLocalAddress(directPeer)) return directPeer // external peer stays external, header or not
+  return forwardedFor || directPeer
+}
+
 // Throws (sends a 401) unless the request is from a local address or carries a valid X-Api-Key
 // header matching the app's own generated key.
 export function requireLocalOrApiKey(event: H3Event): void {
-  const ip = getRequestIP(event, { xForwardedFor: true })
+  const directPeer = getRequestIP(event) // raw socket peer — never trusts any header
+  // Parsed directly rather than via getRequestIP's own xForwardedFor option, to control exactly
+  // which entry is used (the first, i.e. the originating client) regardless of h3-version parsing
+  // differences (a real h3 issue existed where the last entry was picked instead).
+  const forwardedFor = getHeader(event, 'x-forwarded-for')?.split(',')[0]?.trim()
+  const ip = resolveTrustedIp(directPeer, forwardedFor)
   if (ip && isLocalAddress(ip)) return
 
   const provided = getHeader(event, 'x-api-key')

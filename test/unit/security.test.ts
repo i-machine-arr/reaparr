@@ -27,6 +27,38 @@ describe('isLocalAddress', () => {
       expect(isLocalAddress('2001:4860:4860::8888')).toBe(false) // public IPv6 (Google DNS)
     })
   })
+
+  it('covers the full fe80::/10 link-local range, not just the fe80 prefix', () => {
+    return import('../../server/utils/security').then(({ isLocalAddress }) => {
+      expect(isLocalAddress('fe80::1')).toBe(true)
+      expect(isLocalAddress('febf::1')).toBe(true)
+      expect(isLocalAddress('fec0::1')).toBe(false) // outside fe80::/10 — this is a different (deprecated) range
+    })
+  })
+})
+
+describe('resolveTrustedIp (the actual authorization-bypass boundary)', () => {
+  it('trusts X-Forwarded-For only when the direct TCP peer is itself local', async () => {
+    const { resolveTrustedIp } = await import('../../server/utils/security')
+    // Local peer (e.g. a request that actually arrived via a trusted local reverse proxy) — the
+    // forwarded value is trusted, since only a proxy on the trusted network could have placed it.
+    expect(resolveTrustedIp('127.0.0.1', '203.0.113.5')).toBe('203.0.113.5')
+    expect(resolveTrustedIp('192.168.1.10', undefined)).toBe('192.168.1.10')
+  })
+
+  it('never trusts a spoofed X-Forwarded-For from a non-local direct peer — the actual bypass this fixes', async () => {
+    const { resolveTrustedIp } = await import('../../server/utils/security')
+    // An external client connecting directly (no trusted proxy in front) cannot fake being local by
+    // just setting X-Forwarded-For: 127.0.0.1 — their real TCP peer address is what's trusted.
+    expect(resolveTrustedIp('8.8.8.8', '127.0.0.1')).toBe('8.8.8.8')
+    expect(resolveTrustedIp('8.8.8.8', '192.168.1.5')).toBe('8.8.8.8')
+    expect(resolveTrustedIp('8.8.8.8', undefined)).toBe('8.8.8.8')
+  })
+
+  it('returns undefined when there is no direct peer at all', async () => {
+    const { resolveTrustedIp } = await import('../../server/utils/security')
+    expect(resolveTrustedIp(undefined, '127.0.0.1')).toBeUndefined()
+  })
 })
 
 describe('API key', () => {

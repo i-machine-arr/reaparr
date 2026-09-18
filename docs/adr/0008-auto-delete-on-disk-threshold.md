@@ -86,6 +86,12 @@ reuse.
   model: a request from a private/loopback address is trusted outright (consistent with this app's
   existing LAN-trusted design overall), anything else must supply the app's own generated API key
   (`X-Api-Key` header, mirroring the *arr's own convention). See `server/utils/security.ts`.
+  **The initial version of this only checked `X-Forwarded-For` directly, which is client-controlled
+  input — an external caller could set `X-Forwarded-For: 127.0.0.1` and bypass the check entirely
+  (CWE-346, caught by CodeRabbit).** Fixed to validate the actual TCP peer first: a forwarded address
+  is only trusted when the direct connection itself is already local (i.e. it can only have arrived
+  through a proxy on the trusted network); a non-local direct peer is treated as external regardless
+  of what it claims in the header. See `resolveTrustedIp` in `server/utils/security.ts`.
 - Plex and Emby users get watch-history/eligibility scoring today (unaffected by this change) but not
   Leaving Soon visibility until Phase 2 lands.
 

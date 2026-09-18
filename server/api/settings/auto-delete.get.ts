@@ -4,6 +4,7 @@ import { getOrCreateApiKey, requireLocalOrApiKey } from '../../utils/security'
 
 export default defineEventHandler((event) => {
   requireLocalOrApiKey(event) // this response includes the API key itself — must be gated too
+  setResponseHeader(event, 'Cache-Control', 'no-store') // never let a browser/intermediary cache the key
   const settings = getAutoDeleteSettings(getDb())
   return {
     enabled: settings.enabled,
