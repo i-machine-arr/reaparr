@@ -1,4 +1,5 @@
 import { getDb, schema } from '../../db/client'
+import { requireLocalOrApiKey } from '../../utils/security'
 
 interface AutoDeleteBody {
   enabled?: boolean
@@ -12,6 +13,7 @@ function upsert(db: ReturnType<typeof getDb>, key: string, value: string) {
 }
 
 export default defineEventHandler(async (event) => {
+  requireLocalOrApiKey(event)
   const body = await readBody<AutoDeleteBody>(event)
 
   // Validate the whole request before writing anything — silently ignoring one bad field while
