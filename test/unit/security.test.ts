@@ -61,6 +61,28 @@ describe('resolveTrustedIp (the actual authorization-bypass boundary)', () => {
   })
 })
 
+describe('forwarded client address', () => {
+  it('uses the last X-Forwarded-For entry, the one our own proxy appended', async () => {
+    const { clientFromForwardedFor } = await import('../../server/utils/security')
+    // A client that sends "X-Forwarded-For: 127.0.0.1" gets it kept as the first entry; the proxy
+    // then appends the real address. Only the last entry may be trusted.
+    expect(clientFromForwardedFor('127.0.0.1, 203.0.113.5')).toBe('203.0.113.5')
+    expect(clientFromForwardedFor('203.0.113.5')).toBe('203.0.113.5')
+    expect(clientFromForwardedFor(undefined)).toBeUndefined()
+  })
+})
+
+describe('API key comparison', () => {
+  it('accepts only the exact key', async () => {
+    const { apiKeyMatches } = await import('../../server/utils/security')
+    const key = '0123456789abcdef0123456789abcdef'
+    expect(apiKeyMatches(key, key)).toBe(true)
+    expect(apiKeyMatches(key.slice(0, -1) + '0', key)).toBe(false)
+    expect(apiKeyMatches(key.slice(0, 10), key)).toBe(false) // different length
+    expect(apiKeyMatches(undefined, key)).toBe(false)
+  })
+})
+
 describe('API key', () => {
   it('generates a key lazily and persists it across calls', async () => {
     const { getOrCreateApiKey } = await import('../../server/utils/security')

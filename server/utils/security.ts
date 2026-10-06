@@ -12,7 +12,7 @@
 // the trusted network. See resolveTrustedIp below.
 
 import { getDb, schema } from '../db/client'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import type { H3Event } from 'h3'
 
@@ -61,6 +61,21 @@ export function resolveTrustedIp(directPeer: string | undefined, forwardedFor: s
   return forwardedFor || directPeer
 }
 
+// The client address a trusted proxy reports. A reverse proxy appends the address it saw to any
+// X-Forwarded-For header the client already sent, so the FIRST entry is attacker-controlled (a client
+// can send "X-Forwarded-For: 127.0.0.1" itself). Only the LAST entry was written by our own proxy.
+export function clientFromForwardedFor(header: string | undefined): string | undefined {
+  return header?.split(',').pop()?.trim() || undefined
+}
+
+// Constant-time comparison so response timing doesn't reveal how much of the key matched.
+export function apiKeyMatches(provided: string | undefined, expected: string): boolean {
+  if (!provided) return false
+  const a = Buffer.from(provided)
+  const b = Buffer.from(expected)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
 // Throws (sends a 401) unless the request is from a local address or carries a valid X-Api-Key
 // header matching the app's own generated key.
 //
@@ -73,16 +88,15 @@ export function resolveTrustedIp(directPeer: string | undefined, forwardedFor: s
 // works as intended. Test this guard's behavior against a build, not `nuxt dev`.
 export function requireLocalOrApiKey(event: H3Event): void {
   const directPeer = getRequestIP(event) // raw socket peer — never trusts any header
-  // Parsed directly rather than via getRequestIP's own xForwardedFor option, to control exactly
-  // which entry is used (the first, i.e. the originating client) regardless of h3-version parsing
-  // differences (a real h3 issue existed where the last entry was picked instead).
-  const forwardedFor = getHeader(event, 'x-forwarded-for')?.split(',')[0]?.trim()
+  // Parsed directly rather than via getRequestIP's own xForwardedFor option, so we control which
+  // entry is used: the LAST one, the address our own proxy appended (see clientFromForwardedFor).
+  const forwardedFor = clientFromForwardedFor(getHeader(event, 'x-forwarded-for'))
   const ip = resolveTrustedIp(directPeer, forwardedFor)
   if (ip && isLocalAddress(ip)) return
 
   const provided = getHeader(event, 'x-api-key')
   const expected = getOrCreateApiKey()
-  if (provided && provided === expected) return
+  if (apiKeyMatches(provided, expected)) return
 
   throw createError({ statusCode: 401, statusMessage: 'Requires X-Api-Key for non-local requests' })
 }
