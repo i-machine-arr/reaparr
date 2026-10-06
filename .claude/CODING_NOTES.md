@@ -10,7 +10,7 @@ reviews catch them.
 ## Branch Protection
 
 - **GitHub branch protection requires a public repo, or GitHub Pro/Team/Enterprise, on private repos** — `PUT .../branches/.../protection` 403s with "Upgrade to GitHub Pro or make this repository public" otherwise.
-- **Don't set required status-check contexts before the repo has CI that produces them.** A required context that never reports a status permanently blocks merges. This fork has no `.github/workflows/ci.yml` yet (see `.claude/CLAUDE.md` Rule 3) — add required checks only once real CI exists and is green.
+- **Don't set required status-check contexts before the repo has CI that produces them.** A required context that never reports a status permanently blocks merges. This fork's `.github/workflows/ci.yml` runs `pnpm run lint` and `pnpm run typecheck` on every push (see `.claude/CLAUDE.md` Rule 3). Add required checks only for contexts that workflow reports, and only once they are green.
 - **Avoid `required_pull_request_reviews` on a solo-maintained repo.** GitHub won't let an author approve their own PR, so requiring even 1 approval with no other reviewer deadlocks every merge. Rely on required status checks instead of an approval-count gate.
 
 ## General Style Notes

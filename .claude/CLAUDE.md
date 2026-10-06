@@ -116,9 +116,9 @@ Before pushing any commit that touches core logic, on the TrueNAS sandbox (not t
 
 Do not push if there are unhandled exceptions, broken/empty outputs, or unaddressed lint/typecheck errors.
 
-No `.github/workflows/ci.yml` is set up in this fork yet (the template's default CI presupposes a
-Python stack — flake8/bandit/pytest — which doesn't fit this Nuxt/TypeScript project; would need real
-tailoring, e.g. eslint + vitest + `nuxt build`, before adding it).
+`.github/workflows/ci.yml` is tracked and runs on every push. It executes `pnpm run lint` and
+`pnpm run typecheck` on Node 22 (the template's Python checks were replaced for this Nuxt/TypeScript
+project). There is no release workflow yet.
 
 ## Rule 4: Semantic Versioning
 
@@ -127,8 +127,8 @@ Tag releases using `vMAJOR.MINOR.PATCH`:
 - **MINOR** — new features that do not break existing functionality
 - **PATCH** — bug fixes, typo corrections, minor improvements
 
-Pushing a `v*` tag to `main` triggers the release workflow, if/when one exists (see Rule 3 — no CI is set
-up in this fork yet).
+Pushing a `v*` tag to `main` triggers the release workflow, if/when one exists. The current CI workflow
+(see Rule 3) only runs lint and typecheck, so it is not a release workflow.
 
 Before tagging, complete the management review sign-off (Rule 6). Do not tag on the user's silence — get an explicit go/no-go.
 
