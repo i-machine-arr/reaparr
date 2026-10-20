@@ -45,6 +45,20 @@ async function runNow() {
     running.value = false
   }
 }
+
+const regenerating = ref(false)
+async function regenerateKey() {
+  regenerating.value = true
+  try {
+    await $fetch('/api/settings/regenerate-api-key', { method: 'POST' })
+    toast.add({ title: 'API key regenerated', description: 'The old key stops working immediately.', color: 'success', icon: 'i-lucide-refresh-cw' })
+    await refresh()
+  } catch (e) {
+    toast.add({ title: 'Regenerate failed', description: (e as Error).message, color: 'error' })
+  } finally {
+    regenerating.value = false
+  }
+}
 </script>
 
 <template>
@@ -117,6 +131,37 @@ async function runNow() {
             type="number"
             class="w-40"
           />
+        </UFormField>
+      </div>
+    </UCard>
+
+    <UCard>
+      <template #header>
+        <span class="font-semibold">API access</span>
+      </template>
+      <div class="space-y-3">
+        <p class="text-sm text-muted">
+          Requests from a local/private address (matching Sonarr/Radarr's own "local addresses"
+          model) never need this — it's only checked for the destructive auto-delete endpoints, and
+          only when the request comes from outside your LAN.
+        </p>
+        <UFormField label="API key">
+          <div class="flex gap-2">
+            <UInput
+              :model-value="data?.apiKey ?? ''"
+              readonly
+              class="w-full font-mono"
+            />
+            <UButton
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-refresh-cw"
+              :loading="regenerating"
+              @click="regenerateKey"
+            >
+              Regenerate
+            </UButton>
+          </div>
         </UFormField>
       </div>
     </UCard>

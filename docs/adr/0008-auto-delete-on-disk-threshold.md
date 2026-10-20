@@ -74,17 +74,24 @@ reuse.
   one configured root folder is skipped entirely rather than guessed at, since titles aren't (yet)
   associated with which root folder they actually live under — guessing could check the wrong disk's
   pressure for a given title. The common single-root-folder case is exact, not an approximation.
-- **Accepted risk, flagged explicitly rather than silently decided**: `/api/reaping/auto-delete-run`
-  (the manual trigger) has no authentication, same as every other endpoint in this app — there is no
-  session/auth model anywhere yet (upstream's own M1 decision, ADR-0006, LAN-trusted by design,
-  deferred to a separate M2 auth plan). What's different here is that a single unauthenticated POST
-  can trigger bulk, potentially irreversible deletion, unlike the existing per-title endpoints which
-  each require the caller to have already identified one specific title. Mitigating factor: the
-  endpoint is gated behind the same `reaping_auto_delete_enabled` setting as the hourly scheduled
-  task, so anyone reaching it while auto-delete is off (the default) triggers a no-op; if it's on,
-  the scheduled task would do the same thing within the hour regardless. Adding auth to only this one
-  endpoint would be inconsistent with the rest of the unauthenticated app and is out of scope for this
-  change — surfaced here for an explicit human call, not decided unilaterally.
+- **Resolved in a follow-up PR, not silently decided in this one**: `/api/reaping/auto-delete-run`
+  and `/api/settings/auto-delete` originally shipped with no authentication at all, same as every
+  other endpoint in this app (there is no session/auth model anywhere yet — upstream's own M1
+  decision, ADR-0006, LAN-trusted by design, deferred to a separate M2 auth plan). What made this
+  pair different is that a single unauthenticated call can trigger bulk, potentially irreversible
+  deletion, unlike existing per-title endpoints which each require the caller to have already
+  identified one specific title. Rather than bolt inconsistent auth onto just these two endpoints
+  unilaterally, this was surfaced explicitly for a human call — the resulting decision (a separate,
+  focused PR) mirrors Sonarr/Radarr's own "Authentication Required: Disabled for Local Addresses"
+  model: a request from a private/loopback address is trusted outright (consistent with this app's
+  existing LAN-trusted design overall), anything else must supply the app's own generated API key
+  (`X-Api-Key` header, mirroring the *arr's own convention). See `server/utils/security.ts`.
+  **The initial version of this only checked `X-Forwarded-For` directly, which is client-controlled
+  input — an external caller could set `X-Forwarded-For: 127.0.0.1` and bypass the check entirely
+  (CWE-346, caught by CodeRabbit).** Fixed to validate the actual TCP peer first: a forwarded address
+  is only trusted when the direct connection itself is already local (i.e. it can only have arrived
+  through a proxy on the trusted network); a non-local direct peer is treated as external regardless
+  of what it claims in the header. See `resolveTrustedIp` in `server/utils/security.ts`.
 - Plex and Emby users get watch-history/eligibility scoring today (unaffected by this change) but not
   Leaving Soon visibility until Phase 2 lands.
 
